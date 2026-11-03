@@ -1,4 +1,4 @@
-# Makefile for winview (generated from Makefile.in by ./configure)
+# Makefile for winless (generated from Makefile.in by ./configure)
 PACKAGE = @PACKAGE_TARNAME@
 VERSION = @PACKAGE_VERSION@
 srcdir = @srcdir@
@@ -23,36 +23,36 @@ PYTEST = @PYTEST@
 WARN = -Wall -Wextra -Wpedantic
 DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\"
 OBJS = main.o client.o server.o json.o util.o
-DIST_FILES = main.c client.c server.c json.c util.c winview.h viewer.html winview.1 configure configure.ac Makefile.in \
-             install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL requirements.txt tests/test_winview.py
+DIST_FILES = main.c client.c server.c json.c util.c winless.h viewer.html winless.1 configure configure.ac Makefile.in \
+             install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL requirements.txt tests/test_winless.py
 
-all: winview
+all: winless
 
-winview: $(OBJS)
+winless: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-%.o: %.c winview.h
+%.o: %.c winless.h
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-check: winview
+check: winless
 	@if [ -z "$(PYTEST)" ]; then echo "make check: pytest not found (python3 -m venv venv && venv/bin/pip install pytest)"; exit 77; fi
-	WINVIEW_BIN=$(CURDIR)/winview $(PYTEST) -q $(srcdir)/tests
+	WINLESS_BIN=$(CURDIR)/winless $(PYTEST) -q $(srcdir)/tests
 
 # the same tests against a binary built with AddressSanitizer + UBSan
 check-asan:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined" winview
-	ASAN_OPTIONS=detect_leaks=0 WINVIEW_BIN=$(CURDIR)/winview $(PYTEST) -q $(srcdir)/tests
+	$(MAKE) CFLAGS="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined" winless
+	ASAN_OPTIONS=detect_leaks=0 WINLESS_BIN=$(CURDIR)/winless $(PYTEST) -q $(srcdir)/tests
 	$(MAKE) clean
 
 install: all
 	$(srcdir)/install-sh -d $(DESTDIR)$(bindir) $(DESTDIR)$(pkgdatadir) $(DESTDIR)$(mandir)/man1
-	$(INSTALL_PROGRAM) winview $(DESTDIR)$(bindir)/winview
+	$(INSTALL_PROGRAM) winless $(DESTDIR)$(bindir)/winless
 	$(INSTALL_DATA) $(srcdir)/viewer.html $(DESTDIR)$(pkgdatadir)/viewer.html
-	$(INSTALL_DATA) $(srcdir)/winview.1 $(DESTDIR)$(mandir)/man1/winview.1
+	$(INSTALL_DATA) $(srcdir)/winless.1 $(DESTDIR)$(mandir)/man1/winless.1
 
 uninstall:
-	rm -f $(DESTDIR)$(bindir)/winview $(DESTDIR)$(mandir)/man1/winview.1
+	rm -f $(DESTDIR)$(bindir)/winless $(DESTDIR)$(mandir)/man1/winless.1
 	rm -rf $(DESTDIR)$(pkgdatadir)
 
 dist:
@@ -64,7 +64,7 @@ dist:
 	@echo "created $(PACKAGE)-$(VERSION).tar.gz"
 
 clean:
-	rm -f winview $(OBJS)
+	rm -f winless $(OBJS)
 	rm -rf tests/__pycache__ .pytest_cache
 
 distclean: clean

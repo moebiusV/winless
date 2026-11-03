@@ -1,7 +1,7 @@
-/* client.c -- the winview command line: talks to the server, starts it on demand, opens the window.
+/* client.c -- the winless command line: talks to the server, starts it on demand, opens the window.
  * Copyright (C) 2026 David Walther.  GPL-3.0-or-later. */
 #define _POSIX_C_SOURCE 200809L
-#include "winview.h"
+#include "winless.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -92,7 +92,7 @@ static void ensure_server(int port) {
     if (server_alive(port)) return;
     const char *home = getenv("HOME"), *xdg = getenv("XDG_CACHE_HOME");
     char dir[1024], log[1100];
-    if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/winview", xdg); else snprintf(dir, sizeof dir, "%s/.cache/winview", home ? home : "/tmp");
+    if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/winless", xdg); else snprintf(dir, sizeof dir, "%s/.cache/winless", home ? home : "/tmp");
     char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", dir);
     for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
     mkdir(dir, 0755);
@@ -100,9 +100,9 @@ static void ensure_server(int port) {
     char pbuf[16]; snprintf(pbuf, sizeof pbuf, "%d", port);
     char *me = self_path();
     char *argv[] = { me, "--port", pbuf, "serve", NULL };
-    if (!me || !spawn_detached(argv, 0, log)) { fprintf(stderr, "winview: cannot start the server\n"); exit(1); }
+    if (!me || !spawn_detached(argv, 0, log)) { fprintf(stderr, "winless: cannot start the server\n"); exit(1); }
     for (int i = 0; i < 50; i++) { if (server_alive(port)) return; msleep(100); }
-    fprintf(stderr, "winview: the server did not start (see %s)\n", log);
+    fprintf(stderr, "winless: the server did not start (see %s)\n", log);
     exit(1);
 }
 
@@ -111,7 +111,7 @@ static int send_cmd(int port, sb_t *json, char **resp) {
     ensure_server(port);
     int code = http_do(port, "POST", "/cmd", json->s, json->len, 15.0, resp, NULL);
     sb_free(json);
-    if (code != 200) { fprintf(stderr, "winview: the server did not accept the command (HTTP %d)\n", code); return 1; }
+    if (code != 200) { fprintf(stderr, "winless: the server did not accept the command (HTTP %d)\n", code); return 1; }
     return 0;
 }
 
@@ -134,7 +134,7 @@ static const char *BROWSERS[] = {
 };
 
 static const char *find_browser(void) {
-    const char *env = getenv("WINVIEW_BROWSER");
+    const char *env = getenv("WINLESS_BROWSER");
     if (env && *env) return env;
     for (int i = 0; BROWSERS[i]; i++) if (access(BROWSERS[i], X_OK) == 0) return BROWSERS[i];
     return NULL;
@@ -167,15 +167,15 @@ static long status_num(int port, const char *key) {          /* a top-level numb
 
 static int ensure_window(int port, int windowed) {
     if (status_num(port, "clients") > 0) return 1;
-    if (!open_window(port, windowed)) { fprintf(stderr, "winview: no Windows browser found; open http://localhost:%d/ yourself\n", port); return 0; }
+    if (!open_window(port, windowed)) { fprintf(stderr, "winless: no Windows browser found; open http://localhost:%d/ yourself\n", port); return 0; }
     for (int i = 0; i < 100; i++) { if (status_num(port, "clients") > 0) return 1; msleep(200); }
-    fprintf(stderr, "winview: the window did not connect (is http://localhost:%d/ reachable from Windows?)\n", port);
+    fprintf(stderr, "winless: the window did not connect (is http://localhost:%d/ reachable from Windows?)\n", port);
     return 0;
 }
 
 /* -------------------------------------------------------------------------------------------------- commands */
 static void usage(FILE *f) {
-    fputs("usage: winview [--port N] COMMAND [ARGS]\n"
+    fputs("usage: winless [--port N] COMMAND [ARGS]\n"
           "  open [FILE|-] [--name N] [--line N] [--search P] [--theme dark|light] [--font F] [--size PX]\n"
           "       [-N] [-S] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
           "  goto LINE|N%|top|bottom      scroll [-p] N      search [-b] PATTERN   next  prev  clear\n"
@@ -183,7 +183,7 @@ static void usage(FILE *f) {
           "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop]\n"
           "  status [--json] [--text]     wait [--timeout S]     window [--windowed]   close\n"
           "  serve | start | stop         --version   --help\n"
-          "See winview(1).\n", f);
+          "See winless(1).\n", f);
 }
 
 static const struct { const char *name, *key; } KEYNAMES[] = {
@@ -220,16 +220,16 @@ static int cmd_open(int port, int argc, char **argv) {
         else if (!strcmp(a, "--windowed")) windowed = 1;
         else if (!strcmp(a, "-") && !file) file = a;
         else if (a[0] != '-' && !file) file = a;
-        else { fprintf(stderr, "winview open: unknown argument %s\n", a); return 2; }
+        else { fprintf(stderr, "winless open: unknown argument %s\n", a); return 2; }
     }
     ensure_server(port);
     char *data; size_t dlen;
     if (!file || !strcmp(file, "-")) {
-        if (!file && isatty(0)) { fprintf(stderr, "winview open: give a FILE, or pipe text in\n"); return 2; }
+        if (!file && isatty(0)) { fprintf(stderr, "winless open: give a FILE, or pipe text in\n"); return 2; }
         data = read_stdin(&dlen); if (!name) name = "(stdin)";
     } else {
         data = read_file(file, &dlen);
-        if (!data) { fprintf(stderr, "winview open: cannot read %s: %s\n", file, strerror(errno)); return 1; }
+        if (!data) { fprintf(stderr, "winless open: cannot read %s: %s\n", file, strerror(errno)); return 1; }
         if (!name) { const char *sl = strrchr(file, '/'); name = sl ? sl + 1 : file; }
     }
     long since = status_num(port, "seq");
@@ -266,11 +266,11 @@ static int cmd_status(int port, int argc, char **argv) {
     int json = 0, text = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1; else if (!strcmp(argv[i], "--text")) text = 1;
-        else { fprintf(stderr, "winview status: unknown argument %s\n", argv[i]); return 2; }
+        else { fprintf(stderr, "winless status: unknown argument %s\n", argv[i]); return 2; }
     }
     ensure_server(port);
     char *r = NULL; size_t rl = 0;
-    if (http_do(port, "GET", "/status", NULL, 0, 10.0, &r, &rl) != 200) { fprintf(stderr, "winview: no status\n"); free(r); return 1; }
+    if (http_do(port, "GET", "/status", NULL, 0, 10.0, &r, &rl) != 200) { fprintf(stderr, "winless: no status\n"); free(r); return 1; }
     if (json) { printf("%s\n", r); free(r); return 0; }
     jv *j = json_parse(r, rl); free(r);
     const jv *v = json_get(j, "view");
@@ -298,14 +298,14 @@ static int cmd_wait(int port, int argc, char **argv) {
     double timeout = 86400;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--timeout") && i + 1 < argc) timeout = atof(argv[++i]);
-        else { fprintf(stderr, "winview wait: unknown argument %s\n", argv[i]); return 2; }
+        else { fprintf(stderr, "winless wait: unknown argument %s\n", argv[i]); return 2; }
     }
     ensure_server(port);
     long since = status_num(port, "seq");
     char path[128]; snprintf(path, sizeof path, "/wait?since=%ld&timeout=%g", since, timeout);
     char *r = NULL; size_t rl = 0;
     int code = http_do(port, "GET", path, NULL, 0, timeout + 30, &r, &rl);
-    if (code != 200) { fprintf(stderr, "winview wait: no answer from the server\n"); free(r); return 1; }
+    if (code != 200) { fprintf(stderr, "winless wait: no answer from the server\n"); free(r); return 1; }
     jv *j = json_parse(r, rl); free(r);
     int to = json_getbool(j, "timeout", 1);
     const char *ev = json_gets(j, "event", NULL);
@@ -322,7 +322,7 @@ int client_main(int port, int argc, char **argv) {
 
     if (!strcmp(cmd, "help")) { usage(stdout); return 0; }
     if (!strcmp(cmd, "serve")) return server_run(port);
-    if (!strcmp(cmd, "start")) { ensure_server(port); printf("winview server on port %d\n", port); return 0; }
+    if (!strcmp(cmd, "start")) { ensure_server(port); printf("winless server on port %d\n", port); return 0; }
     if (!strcmp(cmd, "stop")) {
         if (server_alive(port)) { char *r = NULL; http_do(port, "POST", "/cmd", "{\"cmd\":\"stop\"}", 14, 5.0, &r, NULL); free(r); }
         return 0;
@@ -336,44 +336,44 @@ int client_main(int port, int argc, char **argv) {
         return ensure_window(port, windowed) ? 0 : 1;
     }
     if (!strcmp(cmd, "goto")) {
-        if (ac != 1) { fprintf(stderr, "usage: winview goto LINE|N%%|top|bottom\n"); return 2; }
+        if (ac != 1) { fprintf(stderr, "usage: winless goto LINE|N%%|top|bottom\n"); return 2; }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"goto\"");
         size_t l = strlen(av[0]);
         if (!strcasecmp(av[0], "top") || !strcasecmp(av[0], "bottom")) { for (char *p = av[0]; *p; p++) *p = (char)((*p >= 'A' && *p <= 'Z') ? *p + 32 : *p); jopt(&b, "where", av[0]); }
         else if (l > 1 && av[0][l - 1] == '%') { jkey(&b, "percent"); json_put_number(&b, atof(av[0])); }
         else if (is_num(av[0])) { jkey(&b, "line"); json_put_number(&b, atof(av[0])); }
-        else { sb_free(&b); fprintf(stderr, "winview goto: not a line, percentage, top or bottom: %s\n", av[0]); return 2; }
+        else { sb_free(&b); fprintf(stderr, "winless goto: not a line, percentage, top or bottom: %s\n", av[0]); return 2; }
         sb_putc(&b, '}');
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "scroll")) {
         int page = 0; const char *n = NULL;
-        for (int i = 0; i < ac; i++) { if (!strcmp(av[i], "-p") || !strcmp(av[i], "--page")) page = 1; else if (is_num(av[i]) && !n) n = av[i]; else { fprintf(stderr, "usage: winview scroll [-p] N\n"); return 2; } }
-        if (!n) { fprintf(stderr, "usage: winview scroll [-p] N\n"); return 2; }
+        for (int i = 0; i < ac; i++) { if (!strcmp(av[i], "-p") || !strcmp(av[i], "--page")) page = 1; else if (is_num(av[i]) && !n) n = av[i]; else { fprintf(stderr, "usage: winless scroll [-p] N\n"); return 2; } }
+        if (!n) { fprintf(stderr, "usage: winless scroll [-p] N\n"); return 2; }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"scroll\",\"n\":"); json_put_number(&b, atof(n)); sb_printf(&b, ",\"page\":%s}", page ? "true" : "false");
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "search")) {
         int back = 0; const char *pat = NULL;
-        for (int i = 0; i < ac; i++) { if (!strcmp(av[i], "-b") || !strcmp(av[i], "--backward")) back = 1; else if (!pat) pat = av[i]; else { fprintf(stderr, "usage: winview search [-b] PATTERN\n"); return 2; } }
-        if (!pat) { fprintf(stderr, "usage: winview search [-b] PATTERN\n"); return 2; }
+        for (int i = 0; i < ac; i++) { if (!strcmp(av[i], "-b") || !strcmp(av[i], "--backward")) back = 1; else if (!pat) pat = av[i]; else { fprintf(stderr, "usage: winless search [-b] PATTERN\n"); return 2; } }
+        if (!pat) { fprintf(stderr, "usage: winless search [-b] PATTERN\n"); return 2; }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"search\""); jopt(&b, "pattern", pat); sb_printf(&b, ",\"backward\":%s}", back ? "true" : "false");
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "mark")) {
-        if (ac < 1 || ac > 2) { fprintf(stderr, "usage: winview mark A[-B] [COLOR]\n"); return 2; }
+        if (ac < 1 || ac > 2) { fprintf(stderr, "usage: winless mark A[-B] [COLOR]\n"); return 2; }
         long lo = atol(av[0]), hi = lo; const char *dash = strchr(av[0], '-');
         if (dash && dash[1]) hi = atol(dash + 1);
         sb_init(&b); sb_printf(&b, "{\"cmd\":\"mark\",\"a\":%ld,\"b\":%ld", lo, hi); jopt(&b, "color", ac > 1 ? av[1] : NULL); sb_putc(&b, '}');
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "hl")) {
-        if (ac < 1 || ac > 2) { fprintf(stderr, "usage: winview hl PATTERN [COLOR]\n"); return 2; }
+        if (ac < 1 || ac > 2) { fprintf(stderr, "usage: winless hl PATTERN [COLOR]\n"); return 2; }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"hl\""); jopt(&b, "pattern", av[0]); jopt(&b, "color", ac > 1 ? av[1] : NULL); sb_putc(&b, '}');
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "key")) {
-        if (ac < 1) { fprintf(stderr, "usage: winview key KEY...\n"); return 2; }
+        if (ac < 1) { fprintf(stderr, "usage: winless key KEY...\n"); return 2; }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"key\",\"keys\":[");
         for (int i = 0; i < ac; i++) {
             const char *k = av[i];
@@ -392,7 +392,7 @@ int client_main(int port, int argc, char **argv) {
             else if (!strcmp(av[i], "--size") && i + 1 < ac) size = atol(av[++i]);
             else if (!strcmp(av[i], "--numbers")) numbers = 1; else if (!strcmp(av[i], "--no-numbers")) numbers = 0;
             else if (!strcmp(av[i], "--wrap")) wrap = 1; else if (!strcmp(av[i], "--chop")) wrap = 0;
-            else { fprintf(stderr, "winview config: unknown argument %s\n", av[i]); return 2; }
+            else { fprintf(stderr, "winless config: unknown argument %s\n", av[i]); return 2; }
         }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"config\"");
         if (theme) jopt(&b, "theme", theme);
@@ -404,7 +404,7 @@ int client_main(int port, int argc, char **argv) {
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "flash")) {
-        if (ac < 1) { fprintf(stderr, "usage: winview flash TEXT\n"); return 2; }
+        if (ac < 1) { fprintf(stderr, "usage: winless flash TEXT\n"); return 2; }
         sb_t t; sb_init(&t);
         for (int i = 0; i < ac; i++) { if (i) sb_putc(&t, ' '); sb_puts(&t, av[i]); }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"flash\""); jopt(&b, "text", t.s); sb_putc(&b, '}'); sb_free(&t);
@@ -413,7 +413,7 @@ int client_main(int port, int argc, char **argv) {
     if (!strcmp(cmd, "next") || !strcmp(cmd, "prev") || !strcmp(cmd, "clear") || !strcmp(cmd, "unmark") || !strcmp(cmd, "unhl") || !strcmp(cmd, "close"))
         return simple_cmd(port, cmd);
 
-    fprintf(stderr, "winview: unknown command: %s\n", cmd);
+    fprintf(stderr, "winless: unknown command: %s\n", cmd);
     usage(stderr);
     return 2;
 }

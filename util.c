@@ -1,6 +1,6 @@
 /* util.c -- growable buffers and small helpers.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later. */
 #define _POSIX_C_SOURCE 200809L
-#include "winview.h"
+#include "winless.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static void die_oom(void) { fputs("winview: out of memory\n", stderr); exit(70); }
+static void die_oom(void) { fputs("winless: out of memory\n", stderr); exit(70); }
 
 void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die_oom(); return p; }
 void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die_oom(); return p; }
@@ -78,10 +78,10 @@ char *read_file(const char *path, size_t *len) {
     return sb_detach(&b, len);
 }
 
-/* Where viewer.html lives: $WINVIEW_HTML, the installed data directory, or next to the executable (source tree). */
+/* Where viewer.html lives: $WINLESS_HTML, the installed data directory, or next to the executable (source tree). */
 const char *viewer_html_path(void) {
     static char buf[4200];
-    const char *env = getenv("WINVIEW_HTML");
+    const char *env = getenv("WINLESS_HTML");
     if (env && *env && access(env, R_OK) == 0) return env;
 #ifdef PKGDATADIR
     snprintf(buf, sizeof buf, "%s/viewer.html", PKGDATADIR);

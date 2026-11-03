@@ -1,7 +1,7 @@
-"""Black-box tests for winview (the C binary): the HTTP/SSE server, its event flow, and the CLI.
+"""Black-box tests for winless (the C binary): the HTTP/SSE server, its event flow, and the CLI.
 No browser is needed: the page's side of the conversation is played by plain HTTP requests.
 
-Run through `make check` (which sets WINVIEW_BIN), or:  WINVIEW_BIN=./winview pytest tests
+Run through `make check` (which sets WINLESS_BIN), or:  WINLESS_BIN=./winless pytest tests
 """
 import json
 import os
@@ -15,10 +15,10 @@ import urllib.request
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.environ.get("WINVIEW_BIN") or os.path.join(ROOT, "winview")
-ENV = dict(os.environ, WINVIEW_HTML=os.path.join(ROOT, "viewer.html"), HOME=os.environ.get("TMPDIR", "/tmp"))
+BIN = os.environ.get("WINLESS_BIN") or os.path.join(ROOT, "winless")
+ENV = dict(os.environ, WINLESS_HTML=os.path.join(ROOT, "viewer.html"), HOME=os.environ.get("TMPDIR", "/tmp"))
 
-pytestmark = pytest.mark.skipif(not os.access(BIN, os.X_OK), reason="winview binary not built (run make)")
+pytestmark = pytest.mark.skipif(not os.access(BIN, os.X_OK), reason="winless binary not built (run make)")
 
 
 def free_port():
@@ -102,12 +102,12 @@ class SSE:
 def test_ping_and_version(server):
     r = http(server, "/ping")
     assert r["ok"] is True and r["version"]
-    assert cli(server, "--version").stdout.decode().startswith("winview ")
+    assert cli(server, "--version").stdout.decode().startswith("winless ")
 
 
 def test_viewer_page_is_served(server):
     html = http(server, "/", raw=True).decode("utf-8")
-    assert "<title>winview</title>" in html and "EventSource" in html
+    assert "<title>winless</title>" in html and "EventSource" in html
 
 
 def test_unknown_path_and_bad_json(server):

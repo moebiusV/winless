@@ -1,10 +1,10 @@
-/* server.c -- the winview HTTP/SSE server: one thread, one poll() loop.
+/* server.c -- the winless HTTP/SSE server: one thread, one poll() loop.
  * Copyright (C) 2026 David Walther.  GPL-3.0-or-later.
  *
  * Endpoints:  GET /  /ping  /content  /status  /wait  /events (Server-Sent Events)    POST /event  /cmd
  */
 #define _POSIX_C_SOURCE 200809L
-#include "winview.h"
+#include "winless.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -214,7 +214,7 @@ static void h_events(conn *c) {
 static void h_index(conn *c) {
     size_t len;
     char *html = read_file(viewer_html_path(), &len);
-    if (!html) { respond_err(c, 500, "cannot read viewer.html (set WINVIEW_HTML)"); return; }
+    if (!html) { respond_err(c, 500, "cannot read viewer.html (set WINLESS_HTML)"); return; }
     respond(c, 200, "text/html; charset=utf-8", html, len);
     free(html);
 }
@@ -332,8 +332,8 @@ int server_run(int port) {
     signal(SIGPIPE, SIG_IGN);
     hub_init();
     int ls = make_listener(port);
-    if (ls < 0) { fprintf(stderr, "winview: cannot listen on 127.0.0.1:%d: %s\n", port, strerror(errno)); return 1; }
-    printf("winview %s serving on http://127.0.0.1:%d/\n", PACKAGE_VERSION, port); fflush(stdout);
+    if (ls < 0) { fprintf(stderr, "winless: cannot listen on 127.0.0.1:%d: %s\n", port, strerror(errno)); return 1; }
+    printf("winless %s serving on http://127.0.0.1:%d/\n", PACKAGE_VERSION, port); fflush(stdout);
 
     while (!g_stop) {
         struct pollfd *pf = xmalloc((nconns + 1) * sizeof *pf);

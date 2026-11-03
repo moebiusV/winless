@@ -1,7 +1,7 @@
 Installation
 ============
 
-winview is one C program (C11 + POSIX: sockets, poll) plus the viewer page viewer.html. It needs a C compiler and make.
+winless is one C program (C11 + POSIX: sockets, poll) plus the viewer page viewer.html. It needs a C compiler and make.
 To open a window under WSL it also needs a Chromium-based browser on the Windows side (Microsoft Edge is preinstalled on
 Windows 10/11); without one, open the printed http://localhost:PORT/ address in any browser.
 
@@ -11,9 +11,9 @@ Windows 10/11); without one, open the printed http://localhost:PORT/ address in 
     make check-asan       # the same tests against an AddressSanitizer/UBSan build
     make install          # honours DESTDIR
     make uninstall
-    make dist             # winview-VERSION.tar.gz
+    make dist             # winless-VERSION.tar.gz
 
-Run it in place without installing:  ./winview open FILE   (it finds viewer.html next to the executable).
+Run it in place without installing:  ./winless open FILE   (it finds viewer.html next to the executable).
 
 Building from a git checkout needs autoconf 2.69 or later to regenerate ./configure from configure.ac (`autoconf`);
 release tarballs ship a generated configure.  Options for configure are the usual ones (--prefix, --bindir, --datadir,

@@ -1,6 +1,9 @@
-winview NEWS -- history of user-visible changes
+winless NEWS -- history of user-visible changes
 
 * Version 0.2.0
+  (This program was called winview until 2026-11-03; it is now winless -- "less" in its own Windows window.
+  Renamed: the command, man page, WINVIEW_* environment variables (now WINLESS_*), and ~/.cache/winview (now
+  ~/.cache/winless).)
   Rewritten in C (the 0.1.0 Python server and CLI are gone; viewer.html is unchanged apart from a page-up fix). One
   single-threaded poll() server, no dependencies beyond libc, builds with autoconf. Disconnected windows are noticed
   at once. The window opens full screen by default (--windowed for a normal one). Page up now exactly undoes page down.

@@ -1,12 +1,12 @@
-.TH WINVIEW 1 "November 2026" "winview 0.2.0" "User Commands"
+.TH WINLESS 1 "November 2026" "winless 0.2.0" "User Commands"
 .SH NAME
-winview \- a less-style viewer in its own window, drivable from the shell
+winless \- a less-style viewer in its own window, drivable from the shell
 .SH SYNOPSIS
-.B winview
+.B winless
 [\fB\-\-port\fR \fIN\fR]
 \fICOMMAND\fR [\fIARGS\fR]
 .SH DESCRIPTION
-.B winview
+.B winless
 shows a text file in a chromeless browser window (full screen by default) with the keys of
 .BR less (1),
 and lets scripts drive it. Under WSL the window opens on the Windows desktop (Microsoft Edge or Chrome).
@@ -67,17 +67,17 @@ g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, 
 :NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; t: theme; Ctrl-plus/minus: font size; h: help; q: quit.
 .SH ENVIRONMENT
 .TP
-.B WINVIEW_PORT
+.B WINLESS_PORT
 Server port. 
 .TP
-.B WINVIEW_BROWSER
+.B WINLESS_BROWSER
 Path of the browser executable used for the window.
 .TP
-.B WINVIEW_HTML
+.B WINLESS_HTML
 Alternate viewer page.
 .SH FILES
 .TP
-.I ~/.cache/winview/server.log
+.I ~/.cache/winless/server.log
 Server log.
 .SH SEE ALSO
 .BR less (1)

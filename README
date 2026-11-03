@@ -1,24 +1,24 @@
-winview -- a "less" in its own window, drivable from the shell
+winless -- a "less" in its own window, drivable from the shell
 ===============================================================
 
-winview shows a text file in a chromeless browser window (full screen by default) with the keys of less, and lets a
+winless shows a text file in a chromeless browser window (full screen by default) with the keys of less, and lets a
 script or another program drive it: jump to a line, search and highlight, shade line ranges, send keys, and read back
 where the person is reading. Under WSL the window opens on the Windows desktop.
 
-    winview open notes.txt            # opens a full-screen window; q quits, h shows the keys
-    winview goto 120                  # drive it from the shell (or from another program)
-    winview search 'ayin|aleph'       # smart-case regex; n / N step through matches
-    winview mark 10-20 yellow         # shade lines
-    winview hl 'Yehovah' blue         # highlight a regex everywhere
-    winview status --text             # what the window shows right now
-    winview wait                      # block until q is pressed or the window closes
+    winless open notes.txt            # opens a full-screen window; q quits, h shows the keys
+    winless goto 120                  # drive it from the shell (or from another program)
+    winless search 'ayin|aleph'       # smart-case regex; n / N step through matches
+    winless mark 10-20 yellow         # shade lines
+    winless hl 'Yehovah' blue         # highlight a regex everywhere
+    winless status --text             # what the window shows right now
+    winless wait                      # block until q is pressed or the window closes
 
-How it works: winview is one small C program (libc only). Its server half (started automatically, port 8777; a single
+How it works: winless is one small C program (libc only). Its server half (started automatically, port 8777; a single
 thread and one poll() loop) serves the viewer page and pushes commands to it over Server-Sent Events; the page posts its
 state and key presses back. The page itself (viewer.html) is plain HTML/CSS/JavaScript. Hebrew and other right-to-left
 lines are laid out with the browser's bidirectional text support.
 
 Build:  ./configure && make && make check && make install   (see INSTALL).
-Environment: WINVIEW_PORT, WINVIEW_BROWSER (path to a browser .exe), WINVIEW_HTML (alternate viewer page).
+Environment: WINLESS_PORT, WINLESS_BROWSER (path to a browser .exe), WINLESS_HTML (alternate viewer page).
 
-See winview(1), INSTALL, NEWS. License: GPL-3.0-or-later (COPYING).
+See winless(1), INSTALL, NEWS. License: GPL-3.0-or-later (COPYING).

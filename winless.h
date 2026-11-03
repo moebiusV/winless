@@ -1,6 +1,6 @@
-/* winview.h -- shared declarations.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later. */
-#ifndef WINVIEW_H
-#define WINVIEW_H
+/* winless.h -- shared declarations.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later. */
+#ifndef WINLESS_H
+#define WINLESS_H
 
 #include <stddef.h>
 

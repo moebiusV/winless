@@ -1,6 +1,6 @@
 /* json.c -- a small JSON parser and writer.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later. */
 #define _POSIX_C_SOURCE 200809L
-#include "winview.h"
+#include "winless.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

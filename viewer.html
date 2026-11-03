@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>winview</title>
+<title>winless</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
@@ -185,8 +185,8 @@ function toggleNumbers() { S.numbers = !S.numbers; view.style.setProperty("--lnw
 function toggleWrap() { S.wrap = !S.wrap; render(); flash(S.wrap ? "wrap lines" : "chop long lines"); }
 function toggleTheme(v) { const light = v === undefined ? !document.documentElement.classList.contains("light") : v === "light"; document.documentElement.classList.toggle("light", light); render(); }
 function setFont(family, size) { const r = document.documentElement.style; if (family) r.setProperty("--font", family); if (size) r.setProperty("--size", size + "px"); render(); }
-function quit() { post({ type: "quit" }); closedSent = true; try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winview closed. You can close this window.</div>'; } }, 300); }
-const HELP = `<h3>winview &mdash; keys (like less)</h3><table>
+function quit() { post({ type: "quit" }); closedSent = true; try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winless closed. You can close this window.</div>'; } }, 300); }
+const HELP = `<h3>winless &mdash; keys (like less)</h3><table>
 <tr><td><b>j</b> &darr; Enter e</td><td>line down</td></tr><tr><td><b>k</b> &uarr; y</td><td>line up</td></tr>
 <tr><td><b>Space</b> f PgDn</td><td>page down</td></tr><tr><td><b>b</b> PgUp</td><td>page up</td></tr>
 <tr><td><b>d</b> / <b>u</b></td><td>half page down / up</td></tr><tr><td><b>g</b> Home / <b>G</b> End</td><td>top / bottom</td></tr>
@@ -244,7 +244,7 @@ async function loadContent() {
   if (j.settings) applySettings(j.settings);
   view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());
   S.top = j.top ? j.top - 1 : 0; S.search = null; S.matchLines = []; S.curLine = -1; S.marks = j.marks || []; S.hls = (j.hls || []).map(h => ({ re: makeRe(h.pattern), color: h.color }));
-  document.title = (S.name || "winview") + " - winview"; render();
+  document.title = (S.name || "winless") + " - winless"; render();
   if (j.search) doSearch(j.search, false, true);
 }
 function applySettings(s) {

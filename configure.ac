@@ -1,7 +1,7 @@
-dnl configure.ac -- winview.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later.
+dnl configure.ac -- winless.  Copyright (C) 2026 David Walther.  GPL-3.0-or-later.
 AC_PREREQ([2.69])
-AC_INIT([winview],[0.2.0],[],[winview])
-AC_CONFIG_SRCDIR([winview.h])
+AC_INIT([winless],[0.2.0],[],[winless])
+AC_CONFIG_SRCDIR([winless.h])
 AC_PROG_CC
 AC_PROG_INSTALL
 AC_SEARCH_LIBS([floor],[m],[],[AC_MSG_ERROR([the math library is required])])

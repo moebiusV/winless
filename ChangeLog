@@ -1,13 +1,15 @@
 2026-11-03  David Walther
 
-	* main.c, client.c, server.c, json.c, util.c, winview.h: rewrite in C (from the Python script); poll() event loop,
+	* Renamed winview to winless (command, sources, man page, tests, environment variables, cache directory).
+
+	* main.c, client.c, server.c, json.c, util.c, winless.h: rewrite in C (from the Python script); poll() event loop,
 	hand-written HTTP/1.1 + Server-Sent Events server, small JSON parser/writer.
 	* configure.ac, Makefile.in, install-sh: autoconf build; make check, check-asan, install, uninstall, dist.
-	* tests/test_winview.py: black-box pytest suite for the binary (22 tests).
+	* tests/test_winless.py: black-box pytest suite for the binary (22 tests).
 	* viewer.html: page up undoes page down exactly.
-	* winview.1, README, INSTALL, NEWS: updated.
+	* winless.1, README, INSTALL, NEWS: updated.
 
-	* winview, viewer.html: initial version.
+	* winless, viewer.html: initial version.
 	* configure, Makefile.in: GNU-style build and install (./configure && make && make install).
-	* winview.1: manual page.
-	* tests/test_winview.py: pytest suite for the server, the event stream and the CLI.
+	* winless.1: manual page.
+	* tests/test_winless.py: pytest suite for the server, the event stream and the CLI.
