@@ -31,7 +31,7 @@ all: winless
 winless: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-%.o: %.c winless.h
+%.o: %.c winless.h Makefile
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 # The tests are C programs (tests/*.c): unit tests of json.c/util.c, and black-box tests that start the real winless
@@ -39,7 +39,7 @@ winless: $(OBJS)
 TEST_PROGS = tests/test_unit tests/test_server tests/test_cli
 TEST_OBJS = tests/testlib.o
 
-tests/%.o: tests/%.c tests/testlib.h winless.h
+tests/%.o: tests/%.c tests/testlib.h winless.h Makefile
 	@mkdir -p tests
 	$(CC) -std=c11 $(WARN) $(DEFS) -I$(srcdir) -I$(srcdir)/tests $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

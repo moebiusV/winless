@@ -6,7 +6,8 @@ winless NEWS -- history of user-visible changes
   ~/.cache/winless).)
   Rewritten in C (the 0.1.0 Python server and CLI are gone; viewer.html is unchanged apart from a page-up fix). One
   single-threaded poll() server, no dependencies beyond libc, builds with autoconf. Disconnected windows are noticed
-  at once. The window opens full screen by default (--windowed for a normal one). Page up now exactly undoes page down.
+  at once. The window opens full screen by default (--windowed for a normal one); it uses its own browser profile so that Edge
+  honours the full-screen flag even when it is already running. Page up now exactly undoes page down.
   The tests are C programs in tests/ (unit tests of the parser and UTF-8 code, plus black-box tests that start the real
   binary); `make check` runs them, `make check-asan` runs them under AddressSanitizer/UBSan. No Python anywhere.
 

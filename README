@@ -19,6 +19,7 @@ state and key presses back. The page itself (viewer.html) is plain HTML/CSS/Java
 lines are laid out with the browser's bidirectional text support.
 
 Build:  ./configure && make && make check && make install   (see INSTALL).
-Environment: WINLESS_PORT, WINLESS_BROWSER (path to a browser .exe), WINLESS_HTML (alternate viewer page).
+Environment: WINLESS_PORT, WINLESS_BROWSER (path to a browser .exe), WINLESS_HTML (alternate viewer page),
+WINLESS_PROFILE (Windows path of the window's browser profile; default %LOCALAPPDATA%\\winless\\profile).
 
 See winless(1), INSTALL, NEWS. License: GPL-3.0-or-later (COPYING).

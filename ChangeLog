@@ -1,5 +1,7 @@
 2026-11-03  David Walther
 
+	* client.c: launch the window with a dedicated --user-data-dir (%LOCALAPPDATA%\\winless\\profile, $WINLESS_PROFILE overrides):
+	an already-running Edge ignored --start-fullscreen, leaving a normal window with a title bar.
 	* Renamed winview to winless (command, sources, man page, tests, environment variables, cache directory).
 
 	* main.c, client.c, server.c, json.c, util.c, winless.h: rewrite in C (from the Python script); poll() event loop,

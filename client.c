@@ -140,14 +140,47 @@ static const char *find_browser(void) {
     return NULL;
 }
 
+/* Edge/Chrome hand a new window to an already-running browser process and then ignore flags such as --start-fullscreen.
+ * A dedicated profile directory forces a separate process that honours them (and keeps winless out of the user's own
+ * browser profile).  The directory is %LOCALAPPDATA%\\winless\\profile; $WINLESS_PROFILE overrides it (empty = none). */
+static char *windows_profile_dir(void) {
+    const char *env = getenv("WINLESS_PROFILE");
+    if (env) return *env ? xstrdup(env) : NULL;
+    FILE *p = popen("cd /mnt/c 2>/dev/null && cmd.exe /c \"echo %LOCALAPPDATA%\" 2>/dev/null", "r");
+    if (!p) return NULL;
+    char line[1024] = "";
+    char *got = fgets(line, sizeof line, p);
+    pclose(p);
+    if (!got) return NULL;
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    if (n < 3 || line[1] != ':') return NULL;                       /* not a Windows path (the variable was not expanded) */
+    sb_t b; sb_init(&b);
+    sb_puts(&b, line); sb_puts(&b, "\\winless\\profile");
+    return sb_detach(&b, NULL);
+}
+
 static int open_window(int port, int windowed) {
     char url[64], app[96];
     snprintf(url, sizeof url, "http://localhost:%d/", port);
     snprintf(app, sizeof app, "--app=%s", url);
     const char *b = find_browser();
     if (b) {
-        char *argv[] = { (char *)b, app, windowed ? "--window-size=1100,820" : "--start-fullscreen", "--new-window", NULL };
-        return spawn_detached(argv, 0, NULL);
+        char *argv[10]; int n = 0;
+        argv[n++] = (char *)b; argv[n++] = app;
+        argv[n++] = windowed ? "--window-size=1100,820" : "--start-fullscreen";
+        argv[n++] = "--new-window"; argv[n++] = "--no-first-run"; argv[n++] = "--no-default-browser-check";
+        char *prof = NULL, *udd = NULL;
+        size_t bl = strlen(b);
+        if (bl > 4 && !strcasecmp(b + bl - 4, ".exe") && (prof = windows_profile_dir()) != NULL) {
+            sb_t u; sb_init(&u); sb_puts(&u, "--user-data-dir="); sb_puts(&u, prof);
+            udd = sb_detach(&u, NULL);
+            argv[n++] = udd;
+        }
+        argv[n] = NULL;
+        int ok = spawn_detached(argv, 0, NULL);
+        free(prof); free(udd);
+        return ok;
     }
     char *ex[] = { "explorer.exe", url, NULL };
     if (spawn_detached(ex, 1, NULL)) return 1;

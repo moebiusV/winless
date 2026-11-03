@@ -75,6 +75,9 @@ Path of the browser executable used for the window.
 .TP
 .B WINLESS_HTML
 Alternate viewer page.
+.TP
+.B WINLESS_PROFILE
+Windows path of the browser profile directory used for the window (default: %LOCALAPPDATA%\\winless\\profile). A dedicated profile makes the browser start a separate process, which is what makes the full-screen and window-size flags take effect when Edge is already running. Set it to the empty string to use the browser's normal profile.
 .SH FILES
 .TP
 .I ~/.cache/winless/server.log
