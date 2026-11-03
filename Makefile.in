@@ -18,13 +18,13 @@ LIBS = @LIBS@
 INSTALL = @INSTALL@
 INSTALL_PROGRAM = @INSTALL_PROGRAM@
 INSTALL_DATA = @INSTALL_DATA@
-PYTEST = @PYTEST@
 
 WARN = -Wall -Wextra -Wpedantic
 DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\"
 OBJS = main.o client.o server.o json.o util.o
 DIST_FILES = main.c client.c server.c json.c util.c winless.h viewer.html winless.1 configure configure.ac Makefile.in \
-             install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL requirements.txt tests/test_winless.py
+             install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL tests/testlib.h tests/testlib.c tests/test_unit.c \
+             tests/test_server.c tests/test_cli.c
 
 all: winless
 
@@ -34,15 +34,32 @@ winless: $(OBJS)
 %.o: %.c winless.h
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-check: winless
-	@if [ -z "$(PYTEST)" ]; then echo "make check: pytest not found (python3 -m venv venv && venv/bin/pip install pytest)"; exit 77; fi
-	WINLESS_BIN=$(CURDIR)/winless $(PYTEST) -q $(srcdir)/tests
+# The tests are C programs (tests/*.c): unit tests of json.c/util.c, and black-box tests that start the real winless
+# binary.  `make check` builds and runs them; sh only invokes them.
+TEST_PROGS = tests/test_unit tests/test_server tests/test_cli
+TEST_OBJS = tests/testlib.o
 
-# the same tests against a binary built with AddressSanitizer + UBSan
+tests/%.o: tests/%.c tests/testlib.h winless.h
+	@mkdir -p tests
+	$(CC) -std=c11 $(WARN) $(DEFS) -I$(srcdir) -I$(srcdir)/tests $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+tests/test_unit: tests/test_unit.o $(TEST_OBJS) json.o util.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_unit.o $(TEST_OBJS) json.o util.o $(LIBS)
+tests/test_server: tests/test_server.o $(TEST_OBJS) json.o util.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_server.o $(TEST_OBJS) json.o util.o $(LIBS)
+tests/test_cli: tests/test_cli.o $(TEST_OBJS) json.o util.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_cli.o $(TEST_OBJS) json.o util.o $(LIBS)
+
+RUN_TESTS = for t in $(TEST_PROGS); do echo "== $$t"; WINLESS_BIN=$(CURDIR)/winless WINLESS_HTML=$(srcdir)/viewer.html ./$$t || exit 1; done
+
+check: winless $(TEST_PROGS)
+	@$(RUN_TESTS)
+
+# the same tests with the program and the tests built with AddressSanitizer + UBSan
 check-asan:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined" winless
-	ASAN_OPTIONS=detect_leaks=0 WINLESS_BIN=$(CURDIR)/winless $(PYTEST) -q $(srcdir)/tests
+	$(MAKE) CFLAGS="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined" winless $(TEST_PROGS)
+	@ASAN_OPTIONS=detect_leaks=0; export ASAN_OPTIONS; $(RUN_TESTS)
 	$(MAKE) clean
 
 install: all
@@ -64,8 +81,7 @@ dist:
 	@echo "created $(PACKAGE)-$(VERSION).tar.gz"
 
 clean:
-	rm -f winless $(OBJS)
-	rm -rf tests/__pycache__ .pytest_cache
+	rm -f winless $(OBJS) $(TEST_PROGS) tests/*.o
 
 distclean: clean
 	rm -f Makefile config.log config.status $(PACKAGE)-*.tar.gz

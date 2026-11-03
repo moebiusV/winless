@@ -640,7 +640,6 @@ ac_includes_default="\
 ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
-PYTEST
 INSTALL_DATA
 INSTALL_SCRIPT
 INSTALL_PROGRAM
@@ -3568,13 +3567,6 @@ esac
 fi
 
 done
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for pytest" >&5
-printf %s "checking for pytest... " >&6; }
-if test -x "$srcdir/venv/bin/pytest"; then PYTEST="$srcdir/venv/bin/pytest"
-else PYTEST=`command -v pytest 2>/dev/null`; fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: ${PYTEST:-no}" >&5
-printf "%s\n" "${PYTEST:-no}" >&6; }
-
 ac_config_files="$ac_config_files Makefile"
 
 cat >confcache <<\_ACEOF

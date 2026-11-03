@@ -7,7 +7,7 @@ Windows 10/11); without one, open the printed http://localhost:PORT/ address in 
 
     ./configure [--prefix=/usr/local]
     make
-    make check            # needs pytest (python3 -m venv venv && venv/bin/pip install pytest -- configure finds it)
+    make check            # builds and runs the C tests in tests/ (no extra tools needed)
     make check-asan       # the same tests against an AddressSanitizer/UBSan build
     make install          # honours DESTDIR
     make uninstall
