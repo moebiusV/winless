@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+.pytest_cache/
+Makefile
+config.status
+config.log
+autom4te.cache/
+*.o
+/winview
+*.tar.gz
+winview-*/

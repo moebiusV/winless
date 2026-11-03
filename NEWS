@@ -1,0 +1,11 @@
+winview NEWS -- history of user-visible changes
+
+* Version 0.2.0
+  Rewritten in C (the 0.1.0 Python server and CLI are gone; viewer.html is unchanged apart from a page-up fix). One
+  single-threaded poll() server, no dependencies beyond libc, builds with autoconf. Disconnected windows are noticed
+  at once. The window opens full screen by default (--windowed for a normal one). Page up now exactly undoes page down.
+  The test suite is black-box (pytest drives the built binary) and also runs under AddressSanitizer/UBSan.
+
+* Version 0.1.0
+  First release (Python): a less-style viewer in its own Windows window (chromeless Edge/Chrome app window) driven from
+  the shell through a local HTTP/SSE server.

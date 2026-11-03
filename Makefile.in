@@ -1,0 +1,74 @@
+# Makefile for winview (generated from Makefile.in by ./configure)
+PACKAGE = @PACKAGE_TARNAME@
+VERSION = @PACKAGE_VERSION@
+srcdir = @srcdir@
+VPATH = @srcdir@
+prefix = @prefix@
+exec_prefix = @exec_prefix@
+bindir = @bindir@
+datarootdir = @datarootdir@
+datadir = @datadir@
+mandir = @mandir@
+pkgdatadir = $(datadir)/$(PACKAGE)
+CC = @CC@
+CFLAGS = @CFLAGS@
+CPPFLAGS = @CPPFLAGS@
+LDFLAGS = @LDFLAGS@
+LIBS = @LIBS@
+INSTALL = @INSTALL@
+INSTALL_PROGRAM = @INSTALL_PROGRAM@
+INSTALL_DATA = @INSTALL_DATA@
+PYTEST = @PYTEST@
+
+WARN = -Wall -Wextra -Wpedantic
+DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\"
+OBJS = main.o client.o server.o json.o util.o
+DIST_FILES = main.c client.c server.c json.c util.c winview.h viewer.html winview.1 configure configure.ac Makefile.in \
+             install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL requirements.txt tests/test_winview.py
+
+all: winview
+
+winview: $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+%.o: %.c winview.h
+	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+check: winview
+	@if [ -z "$(PYTEST)" ]; then echo "make check: pytest not found (python3 -m venv venv && venv/bin/pip install pytest)"; exit 77; fi
+	WINVIEW_BIN=$(CURDIR)/winview $(PYTEST) -q $(srcdir)/tests
+
+# the same tests against a binary built with AddressSanitizer + UBSan
+check-asan:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined" winview
+	ASAN_OPTIONS=detect_leaks=0 WINVIEW_BIN=$(CURDIR)/winview $(PYTEST) -q $(srcdir)/tests
+	$(MAKE) clean
+
+install: all
+	$(srcdir)/install-sh -d $(DESTDIR)$(bindir) $(DESTDIR)$(pkgdatadir) $(DESTDIR)$(mandir)/man1
+	$(INSTALL_PROGRAM) winview $(DESTDIR)$(bindir)/winview
+	$(INSTALL_DATA) $(srcdir)/viewer.html $(DESTDIR)$(pkgdatadir)/viewer.html
+	$(INSTALL_DATA) $(srcdir)/winview.1 $(DESTDIR)$(mandir)/man1/winview.1
+
+uninstall:
+	rm -f $(DESTDIR)$(bindir)/winview $(DESTDIR)$(mandir)/man1/winview.1
+	rm -rf $(DESTDIR)$(pkgdatadir)
+
+dist:
+	rm -rf $(PACKAGE)-$(VERSION)
+	mkdir -p $(PACKAGE)-$(VERSION)/tests
+	for f in $(DIST_FILES); do cp -p $(srcdir)/$$f $(PACKAGE)-$(VERSION)/$$f; done
+	tar czf $(PACKAGE)-$(VERSION).tar.gz $(PACKAGE)-$(VERSION)
+	rm -rf $(PACKAGE)-$(VERSION)
+	@echo "created $(PACKAGE)-$(VERSION).tar.gz"
+
+clean:
+	rm -f winview $(OBJS)
+	rm -rf tests/__pycache__ .pytest_cache
+
+distclean: clean
+	rm -f Makefile config.log config.status $(PACKAGE)-*.tar.gz
+	rm -rf autom4te.cache
+
+.PHONY: all check check-asan install uninstall dist clean distclean

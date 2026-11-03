@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>winview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
+          --cur:#b3541e; --curfg:#fff; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
+  :root.light { --bg:#fbfaf6; --fg:#22252a; --dim:#7a7468; --bar:#e8e3d6; --mark:#fff0a8; --hl:#cfe3ff;
+          --cur:#ffb27a; --curfg:#000; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden; }
+  #view { position:absolute; left:0; right:0; top:0; bottom:var(--barh,28px); overflow:hidden; padding:2px 10px;
+          font:var(--size)/1.38 var(--font); box-sizing:border-box; }
+  .line { white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; min-height:1.38em; }
+  .chop .line { white-space:pre; overflow:hidden; text-overflow:clip; }
+  .ln { display:inline-block; min-width:var(--lnw,4ch); margin-right:1.2ch; color:var(--dim); text-align:right;
+        unicode-bidi:isolate; user-select:none; }
+  .mk { background:var(--mark); }
+  .hit { background:var(--hl); border-radius:2px; }
+  .cur { background:var(--cur); color:var(--curfg); border-radius:2px; }
+  #measure { position:absolute; visibility:hidden; left:0; right:0; top:0; height:auto; overflow:visible; padding:2px 10px;
+             font:var(--size)/1.38 var(--font); box-sizing:border-box; pointer-events:none; }
+  #bar { position:absolute; left:0; right:0; bottom:0; height:var(--barh,28px); background:var(--bar); color:var(--fg);
+         font:14px/28px var(--font); padding:0 10px; box-sizing:border-box; display:flex; gap:16px; white-space:nowrap;
+         overflow:hidden; }
+  #bar .name { color:var(--dim); overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; }
+  #bar .pos { flex:1 1 auto; }
+  #bar .srch { color:var(--dim); }
+  #bar .end { color:#e0b050; }
+  #prompt { display:none; flex:1; }
+  #prompt input { background:transparent; border:0; outline:0; color:var(--fg); font:14px var(--font); width:calc(100% - 2ch); }
+  #help { display:none; position:absolute; inset:0 0 var(--barh,28px) 0; background:var(--bg); padding:18px 28px;
+          font:15px/1.5 var(--font); overflow:auto; }
+  #help b { color:#e0b050; } #help td { padding:1px 18px 1px 0; vertical-align:top; }
+  #flash { position:absolute; right:14px; top:8px; background:var(--bar); color:var(--fg); padding:4px 10px;
+           border-radius:4px; font:13px var(--font); opacity:0; transition:opacity .25s; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="measure"></div>
+<div id="help"></div>
+<div id="flash"></div>
+<div id="bar"><span class="name" id="bname"></span><span class="pos" id="bpos"></span><span class="srch" id="bsrch"></span>
+  <span id="prompt"><span id="pch">/</span><input id="pin" autocomplete="off" spellcheck="false"></span></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const view = $("view"), measure = $("measure");
+const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true,
+            search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false };
+let sentTimer = null, closedSent = false;
+
+/* ---------- helpers ---------- */
+function flash(msg) { const f = $("flash"); f.textContent = msg; f.style.opacity = 1; clearTimeout(f._t); f._t = setTimeout(() => f.style.opacity = 0, 1400); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function total() { return S.lines.length; }
+function lnWidth() { return Math.max(4, String(total()).length + 1) + "ch"; }
+function smartcase(p) { return /[A-Z]/.test(p) ? "g" : "gi"; }
+function makeRe(p) { try { return new RegExp(p, smartcase(p)); } catch (e) { return new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), smartcase(p)); } }
+function colorVar(c) { return { yellow:"#7a6a00", red:"#7a2a2a", green:"#245a2a", blue:"#274a73", purple:"#55307a", orange:"#8a4a10" }[c] || c || ""; }
+
+/* ---------- line rendering ---------- */
+function lineNode(i) {
+  const d = document.createElement("div"); d.className = "line"; d.dir = "auto"; d.dataset.i = i;
+  const text = S.lines[i];
+  if (S.numbers) { const n = document.createElement("span"); n.className = "ln"; n.textContent = i + 1; d.appendChild(n); }
+  const ranges = [];
+  const add = (re, cls) => { re.lastIndex = 0; let m; while ((m = re.exec(text)) && m[0] !== "") { ranges.push([m.index, m.index + m[0].length, cls]); if (re.lastIndex === m.index) re.lastIndex++; } };
+  for (const h of S.hls) add(h.re, "hl:" + (h.color || ""));
+  if (S.search) add(S.search.re, i === S.curLine ? "cur" : "hit");
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  let pos = 0;
+  const put = (s, e, cls) => {
+    if (e <= s) return; const t = text.slice(s, e);
+    if (!cls) { d.appendChild(document.createTextNode(t)); return; }
+    const sp = document.createElement("span");
+    if (cls.startsWith("hl:")) { sp.style.background = colorVar(cls.slice(3)) || "var(--hl)"; sp.style.borderRadius = "2px"; } else sp.className = cls;
+    sp.textContent = t; d.appendChild(sp);
+  };
+  for (const r of ranges) { if (r[0] < pos) continue; put(pos, r[0], null); put(r[0], r[1], r[2]); pos = r[1]; }
+  put(pos, text.length, null);
+  if (!text) d.appendChild(document.createTextNode("​"));
+  for (const m of S.marks) if (i + 1 >= m.a && i + 1 <= m.b) { d.classList.add("mk"); if (m.color) d.style.background = colorVar(m.color); }
+  return d;
+}
+
+function fitFrom(top) {              // render forward from `top`; returns index of last fully visible line
+  view.textContent = ""; view.classList.toggle("chop", !S.wrap);
+  const H = view.clientHeight - 4; let last = top - 1;
+  for (let i = top; i < total(); i += 40) {
+    const frag = document.createDocumentFragment(); const end = Math.min(total(), i + 40);
+    for (let k = i; k < end; k++) frag.appendChild(lineNode(k));
+    view.appendChild(frag);
+    const kids = view.children; let cut = -1;
+    for (let k = 0; k < kids.length; k++) { if (kids[k].offsetTop - view.offsetTop + kids[k].offsetHeight > H + 2) { cut = k; break; } }
+    if (cut >= 0) { while (view.children.length > Math.max(cut, 1)) view.removeChild(view.lastChild); break; }
+  }
+  last = top + view.children.length - 1;
+  return last;
+}
+
+function topForBottom(endIdx) {      // smallest top such that lines top..endIdx fit the screen
+  measure.className = S.wrap ? "" : "chop"; measure.textContent = ""; const H = view.clientHeight - 4;
+  let top = endIdx + 1;
+  for (let i = endIdx; i >= 0; i--) {
+    measure.insertBefore(lineNode(i), measure.firstChild);
+    if (measure.offsetHeight - 4 > H && top <= endIdx) break;
+    top = i;
+  }
+  measure.textContent = "";
+  return top;
+}
+
+function render() {
+  S.top = clamp(S.top, 0, Math.max(0, total() - 1));
+  S.bottom = total() ? fitFrom(S.top) : -1;
+  S.atEnd = S.bottom >= total() - 1;
+  const n = total(), shown = S.bottom - S.top + 1;
+  $("bname").textContent = S.name || "(no file)";
+  $("bpos").innerHTML = "";
+  const pos = $("bpos");
+  if (!n) pos.textContent = "(empty)";
+  else {
+    const pct = Math.round(100 * (S.bottom + 1) / n);
+    pos.textContent = `lines ${S.top + 1}-${S.bottom + 1} of ${n} (${pct}%)`;
+    if (S.atEnd) { const e = document.createElement("span"); e.className = "end"; e.textContent = "  (END)"; pos.appendChild(e); }
+  }
+  $("bsrch").textContent = S.search ? `/${S.search.src}  ${S.matchLines.length} line${S.matchLines.length === 1 ? "" : "s"}` : "";
+  scheduleState();
+}
+
+/* ---------- movement ---------- */
+function lineDown(n = 1) { if (S.atEnd) { flash("(END)"); return; } S.top = Math.min(S.top + n, total() - 1); render(); }
+function lineUp(n = 1) { S.top = Math.max(0, S.top - n); render(); }
+function pageDown(frac = 1) { if (S.atEnd) { flash("(END)"); return; } const shown = Math.max(1, S.bottom - S.top + 1); S.top = clamp(frac === 1 ? S.bottom + 1 : S.top + Math.max(1, Math.floor(shown * frac)), 0, total() - 1); render(); }
+function pageUp(frac = 1) { if (S.top === 0) { flash("(TOP)"); return; } const shown = Math.max(1, S.bottom - S.top + 1);
+  S.top = frac === 1 ? topForBottom(S.top - 1) : Math.max(0, S.top - Math.max(1, Math.floor(shown * frac))); S.top = Math.min(S.top, Math.max(0, total() - 1)); render(); }
+function gotoLine(n) { S.top = clamp(n - 1, 0, Math.max(0, total() - 1)); render(); }
+function gotoTop() { S.top = 0; render(); }
+function gotoBottom() { S.top = topForBottom(total() - 1); render(); }
+function gotoPercent(p) { S.top = clamp(Math.floor(total() * p / 100), 0, Math.max(0, total() - 1)); render(); }
+
+/* ---------- search ---------- */
+function doSearch(pattern, back = false, quiet = false) {
+  if (pattern === "" || pattern == null) { S.search = null; S.matchLines = []; S.curLine = -1; render(); return; }
+  const re = makeRe(pattern); S.search = { src: pattern, re }; S.searchBack = back;
+  S.matchLines = []; const probe = new RegExp(re.source, re.flags.replace("g", ""));
+  for (let i = 0; i < total(); i++) if (probe.test(S.lines[i])) S.matchLines.push(i);
+  S.curLine = -1; stepMatch(back ? -1 : 1, true, quiet);
+}
+function stepMatch(dir, first = false, quiet = false) {
+  if (!S.search || !S.matchLines.length) { if (!quiet) flash(S.search ? "Pattern not found" : "No previous search"); render(); return false; }
+  const ref = first ? (dir > 0 ? S.top - 1 : S.top + 1) : (S.curLine >= 0 ? S.curLine : S.top);
+  let next = -1;
+  if (dir > 0) { next = S.matchLines.find(i => i > ref); if (next === undefined) next = -1; }
+  else { for (let k = S.matchLines.length - 1; k >= 0; k--) if (S.matchLines[k] < ref) { next = S.matchLines[k]; break; } }
+  if (next < 0) { if (!quiet) flash("Pattern not found (no more matches)"); render(); return false; }
+  S.curLine = next; S.top = next; render(); return true;
+}
+
+/* ---------- prompt ---------- */
+function openPrompt(ch) { S.prompt = ch; $("pch").textContent = ch; $("prompt").style.display = "flex"; $("bname").style.display = "none"; $("bpos").style.display = "none"; $("bsrch").style.display = "none"; const i = $("pin"); i.value = ""; i.focus(); }
+function closePrompt() { S.prompt = null; $("prompt").style.display = "none"; for (const id of ["bname", "bpos", "bsrch"]) $(id).style.display = ""; $("pin").blur(); document.body.focus(); }
+$("pin").addEventListener("keydown", e => {
+  if (e.key === "Escape") { closePrompt(); e.preventDefault(); }
+  else if (e.key === "Enter") { const v = $("pin").value, ch = S.prompt; closePrompt(); runPrompt(ch, v); e.preventDefault(); }
+  e.stopPropagation();
+});
+function runPrompt(ch, v) {
+  if (ch === "/") doSearch(v, false); else if (ch === "?") doSearch(v, true);
+  else if (ch === ":") {
+    v = v.trim(); let m;
+    if (v === "q" || v === "quit") quit();
+    else if ((m = v.match(/^(\d+)$/))) gotoLine(+m[1]);
+    else if ((m = v.match(/^(\d+)%$/))) gotoPercent(+m[1]);
+    else if (v === "set numbers" || v === "N") toggleNumbers(); else if (v === "set wrap") toggleWrap(); else flash("Unknown command: " + v);
+  }
+}
+
+/* ---------- toggles / misc ---------- */
+function toggleNumbers() { S.numbers = !S.numbers; view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth()); render(); flash("line numbers " + (S.numbers ? "on" : "off")); }
+function toggleWrap() { S.wrap = !S.wrap; render(); flash(S.wrap ? "wrap lines" : "chop long lines"); }
+function toggleTheme(v) { const light = v === undefined ? !document.documentElement.classList.contains("light") : v === "light"; document.documentElement.classList.toggle("light", light); render(); }
+function setFont(family, size) { const r = document.documentElement.style; if (family) r.setProperty("--font", family); if (size) r.setProperty("--size", size + "px"); render(); }
+function quit() { post({ type: "quit" }); closedSent = true; try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winview closed. You can close this window.</div>'; } }, 300); }
+const HELP = `<h3>winview &mdash; keys (like less)</h3><table>
+<tr><td><b>j</b> &darr; Enter e</td><td>line down</td></tr><tr><td><b>k</b> &uarr; y</td><td>line up</td></tr>
+<tr><td><b>Space</b> f PgDn</td><td>page down</td></tr><tr><td><b>b</b> PgUp</td><td>page up</td></tr>
+<tr><td><b>d</b> / <b>u</b></td><td>half page down / up</td></tr><tr><td><b>g</b> Home / <b>G</b> End</td><td>top / bottom</td></tr>
+<tr><td><b>/</b>pat / <b>?</b>pat</td><td>search forward / backward (smart-case regex)</td></tr><tr><td><b>n</b> / <b>N</b></td><td>next / previous match</td></tr>
+<tr><td><b>:</b>123 <b>:</b>50%</td><td>go to line / percent</td></tr><tr><td><b>-N</b> or <b>#</b></td><td>toggle line numbers</td></tr>
+<tr><td><b>-S</b> or <b>w</b></td><td>toggle wrap / chop</td></tr><tr><td><b>t</b></td><td>toggle dark / light</td></tr>
+<tr><td><b>+</b> / <b>&minus;</b> (ctrl)</td><td>font bigger / smaller</td></tr><tr><td><b>h</b></td><td>this help</td></tr><tr><td><b>q</b></td><td>quit</td></tr></table>
+<p>Press any key to close this help.</p>`;
+function toggleHelp(on) { const h = $("help"); h.innerHTML = HELP; h.style.display = on ? "block" : "none"; }
+
+/* ---------- keyboard ---------- */
+let pendingDash = false;
+function handleKey(k, e) {
+  if ($("help").style.display === "block") { toggleHelp(false); return true; }
+  if (pendingDash) { pendingDash = false; if (k === "N") { toggleNumbers(); return true; } if (k === "S") { toggleWrap(); return true; } }
+  switch (k) {
+    case "j": case "ArrowDown": case "Enter": case "e": lineDown(); break;
+    case "k": case "ArrowUp": case "y": lineUp(); break;
+    case " ": case "f": case "PageDown": pageDown(); break;
+    case "b": case "PageUp": pageUp(); break;
+    case "d": pageDown(0.5); break; case "u": pageUp(0.5); break;
+    case "g": case "Home": gotoTop(); break; case "G": case "End": gotoBottom(); break;
+    case "/": openPrompt("/"); break; case "?": openPrompt("?"); break; case ":": openPrompt(":"); break;
+    case "n": stepMatch(S.searchBack ? -1 : 1); break; case "N": stepMatch(S.searchBack ? 1 : -1); break;
+    case "-": pendingDash = true; break; case "#": toggleNumbers(); break; case "w": toggleWrap(); break;
+    case "t": toggleTheme(); break; case "h": toggleHelp(true); break; case "q": quit(); break;
+    case "Escape": doSearch(""); break;
+    default: return false;
+  }
+  return true;
+}
+document.addEventListener("keydown", e => {
+  if (S.prompt) return;
+  if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { setFont(null, parseInt(getComputedStyle(document.documentElement).getPropertyValue("--size")) + 1); e.preventDefault(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key === "-") { setFont(null, parseInt(getComputedStyle(document.documentElement).getPropertyValue("--size")) - 1); e.preventDefault(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (handleKey(e.key, e)) e.preventDefault();
+});
+document.addEventListener("wheel", e => { if (S.prompt) return; const n = Math.sign(e.deltaY) * 3; if (n > 0) lineDown(n); else lineUp(-n); e.preventDefault(); }, { passive: false });
+window.addEventListener("resize", () => render());
+
+/* ---------- server link ---------- */
+function post(obj) { try { return fetch("/event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj), keepalive: true }); } catch (e) {} }
+function scheduleState() { clearTimeout(sentTimer); sentTimer = setTimeout(sendState, 120); }
+function sendState() {
+  post({ type: "state", name: S.name, top: S.top + 1, bottom: S.bottom + 1, total: total(), atEnd: S.atEnd,
+         search: S.search ? S.search.src : null, matchLines: S.matchLines.length, curLine: S.curLine + 1,
+         numbers: S.numbers, wrap: S.wrap, theme: document.documentElement.classList.contains("light") ? "light" : "dark",
+         width: view.clientWidth, height: view.clientHeight,
+         visible: Array.from(view.children).map(c => c.textContent.replace(/^\d+/, "")).slice(0, 80) });
+}
+async function loadContent() {
+  const r = await fetch("/content", { cache: "no-store" }); const j = await r.json();
+  S.name = j.name || ""; S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+  if (j.settings) applySettings(j.settings);
+  view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());
+  S.top = j.top ? j.top - 1 : 0; S.search = null; S.matchLines = []; S.curLine = -1; S.marks = j.marks || []; S.hls = (j.hls || []).map(h => ({ re: makeRe(h.pattern), color: h.color }));
+  document.title = (S.name || "winview") + " - winview"; render();
+  if (j.search) doSearch(j.search, false, true);
+}
+function applySettings(s) {
+  if (s.theme) toggleTheme(s.theme); if (s.font || s.size) setFont(s.font, s.size);
+  if (s.numbers !== undefined && s.numbers !== null && s.numbers !== S.numbers) { S.numbers = s.numbers; }
+  if (s.wrap !== undefined && s.wrap !== null) S.wrap = s.wrap;
+}
+function onCommand(c) {
+  switch (c.cmd) {
+    case "load": loadContent(); break;
+    case "goto": c.line ? gotoLine(c.line) : c.percent !== undefined ? gotoPercent(c.percent) : c.where === "bottom" ? gotoBottom() : gotoTop(); break;
+    case "scroll": if (c.page) { c.n >= 0 ? pageDown(Math.abs(c.n) || 1) : pageUp(Math.abs(c.n)); } else if (c.n >= 0) { S.top = clamp(S.top + c.n, 0, Math.max(0, total() - 1)); render(); } else lineUp(-c.n); break;
+    case "search": doSearch(c.pattern, !!c.backward); break;
+    case "next": stepMatch(S.searchBack ? -1 : 1); break; case "prev": stepMatch(S.searchBack ? 1 : -1); break;
+    case "clear": doSearch(""); break;
+    case "mark": S.marks.push({ a: c.a, b: c.b, color: c.color }); render(); break;
+    case "unmark": S.marks = []; render(); break;
+    case "hl": S.hls.push({ re: makeRe(c.pattern), color: c.color }); render(); break;
+    case "unhl": S.hls = []; render(); break;
+    case "key": for (const k of c.keys) { handleKey(k, null); } break;
+    case "config": applySettings(c); render(); break;
+    case "flash": flash(c.text); break;
+    case "close": window.close(); break;
+    case "sendstate": sendState(); break;
+  }
+}
+function connect() {
+  const es = new EventSource("/events");
+  es.onmessage = ev => { try { onCommand(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  es.onopen = () => { post({ type: "hello" }); loadContent(); };
+  es.onerror = () => { /* the browser reconnects by itself */ };
+}
+window.addEventListener("beforeunload", () => { if (!closedSent) navigator.sendBeacon("/event", JSON.stringify({ type: "closed" })); });
+connect();
+</script>
+</body>
+</html>

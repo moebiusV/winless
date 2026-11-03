@@ -1,0 +1,85 @@
+.TH WINVIEW 1 "November 2026" "winview 0.2.0" "User Commands"
+.SH NAME
+winview \- a less-style viewer in its own window, drivable from the shell
+.SH SYNOPSIS
+.B winview
+[\fB\-\-port\fR \fIN\fR]
+\fICOMMAND\fR [\fIARGS\fR]
+.SH DESCRIPTION
+.B winview
+shows a text file in a chromeless browser window (full screen by default) with the keys of
+.BR less (1),
+and lets scripts drive it. Under WSL the window opens on the Windows desktop (Microsoft Edge or Chrome).
+A small built-in HTTP server (one thread, started on demand; default port 8777); the viewer page receives commands
+from it over Server-Sent Events and posts its state and key presses back, so a program can also read where the
+person is reading. Right-to-left text such as Hebrew is laid out with the browser's bidirectional text support.
+.SH COMMANDS
+.TP
+.BI open " " [FILE|\-]
+Load a file, or standard input, and open the window if none is connected. Options:
+.BR \-\-name ,
+.BR \-\-line " N,"
+.BR \-\-search " PATTERN,"
+.BR \-\-theme " dark|light,"
+.BR \-\-font " FAMILY,"
+.BR \-\-size " PX,"
+.BR \-N " (line numbers),"
+.BR \-S " (chop long lines),"
+.BR \-\-windowed " (normal window instead of full screen),"
+.BR \-\-no\-window " (load only),"
+.BR \-\-wait " (block until q or the window closes)."
+.TP
+.BI goto " LINE|N%|top|bottom"
+Jump to a line, a percentage, or an end.
+.TP
+.BR scroll " [\-p] " N
+Scroll N lines (pages with \-p); negative scrolls up.
+.TP
+.BR search " [\-b] " PATTERN
+Search (smart-case regular expression) and jump to the first match. \fBnext\fR and \fBprev\fR step; \fBclear\fR removes it.
+.TP
+.BR mark " A[\-B] [" COLOR ]
+Shade a line range; \fBunmark\fR removes all shading.
+.TP
+.BR hl " " PATTERN " [" COLOR ]
+Highlight a regular expression wherever it occurs; \fBunhl\fR removes them.
+.TP
+.BI key " KEY..."
+Send keys as if typed (j k space b g G / n and the names enter, up, down, pgup, pgdn, home, end, esc).
+.TP
+.BR config " [\-\-theme T] [\-\-font F] [\-\-size N] [\-\-numbers|\-\-no\-numbers] [\-\-wrap|\-\-chop]"
+Change the display.
+.TP
+.BI flash " TEXT"
+Show a short message in the window.
+.TP
+.BR status " [\-\-json] [\-\-text]"
+Report the visible line range, search state and window size; \-\-text also prints the visible lines.
+.TP
+.B wait
+Block until q is pressed or the window is closed.
+.TP
+.BR window ", " close ", " start ", " stop ", " serve
+Open the window; close it; start the server in the background; stop it; run it in the foreground.
+.SH KEYS
+j, Down, Enter, e: line down; k, Up, y: line up; Space, f, PageDown: page down; b, PageUp: page up; d, u: half page;
+g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match;
+:NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; t: theme; Ctrl-plus/minus: font size; h: help; q: quit.
+.SH ENVIRONMENT
+.TP
+.B WINVIEW_PORT
+Server port. 
+.TP
+.B WINVIEW_BROWSER
+Path of the browser executable used for the window.
+.TP
+.B WINVIEW_HTML
+Alternate viewer page.
+.SH FILES
+.TP
+.I ~/.cache/winview/server.log
+Server log.
+.SH SEE ALSO
+.BR less (1)
+.SH AUTHOR
+David Walther.
