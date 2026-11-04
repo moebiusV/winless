@@ -158,6 +158,47 @@ static void t_file_reading(void) {
     CHECK(read_file("/nonexistent/definitely/not/here", &n) == NULL);
 }
 
+/* ---- edit.c ---- */
+static void t_edit_offset(void) {
+    const char *t = "h\xC3\xA9llo\nw\xC3\xB6rld\n";                  /* "héllo\nwörld\n": é and ö are 2 bytes each */
+    size_t n = strlen(t);
+    CHECK_INT(edit_offset(t, n, 1, 1), 0);
+    CHECK_INT(edit_offset(t, n, 1, 3), 3);                         /* after h and é */
+    CHECK_INT(edit_offset(t, n, 1, 6), 6);                         /* column length+1 is the end of the row */
+    CHECK_INT(edit_offset(t, n, 1, 7), -1);                        /* but no further */
+    CHECK_INT(edit_offset(t, n, 2, 1), 7);
+    CHECK_INT(edit_offset(t, n, 2, 4), 11);
+    CHECK_INT(edit_offset(t, n, 3, 1), n);                         /* the empty row after the final newline */
+    CHECK_INT(edit_offset(t, n, 3, 2), -1);
+    CHECK_INT(edit_offset(t, n, 4, 1), -1);
+    CHECK_INT(edit_offset(t, n, 0, 1), -1); CHECK_INT(edit_offset(t, n, 1, 0), -1);
+    CHECK_INT(edit_offset("ab", 2, 2, 1), 2);                      /* just past an unterminated last row */
+    CHECK_INT(edit_offset("ab", 2, 1, 3), 2);
+    CHECK_INT(edit_offset("", 0, 1, 1), 0);
+}
+
+static void t_edit_replace_and_endpos(void) {
+    const char *t = "alpha\nbeta\ngamma\n";
+    size_t n = strlen(t), outn, rn; char *removed;
+    char *o = edit_replace(t, n, 2, 1, 2, 5, "BETA", 4, &outn, &removed, &rn);       /* within a row */
+    CHECK_STR(o, "alpha\nBETA\ngamma\n"); CHECK_STR(removed, "beta"); CHECK_INT(rn, 4); free(o); free(removed);
+    o = edit_replace(t, n, 1, 4, 3, 3, "-", 1, &outn, &removed, &rn);                /* across rows */
+    CHECK_STR(o, "alp-mma\n"); CHECK_STR(removed, "ha\nbeta\nga"); free(o); free(removed);
+    o = edit_replace(t, n, 2, 1, 3, 1, "", 0, &outn, &removed, &rn);                 /* a whole line, newline included */
+    CHECK_STR(o, "alpha\ngamma\n"); CHECK_STR(removed, "beta\n"); free(o); free(removed);
+    o = edit_replace(t, n, 5, 1, 5, 1, "x", 1, &outn, NULL, NULL); CHECK(o == NULL);  /* row 5 does not exist */
+    o = edit_replace(t, n, 3, 1, 4, 1, "", 0, &outn, NULL, NULL);                    /* row 4 is the empty row after the final newline */
+    CHECK_STR(o, "alpha\nbeta\n"); free(o);
+    o = edit_replace(t, n, 3, 1, 2, 1, "x", 1, &outn, NULL, NULL); CHECK(o == NULL);  /* end before begin */
+    o = edit_replace(t, n, 3, 6, 3, 6, "!", 1, &outn, NULL, NULL);                   /* insert at the end of a row */
+    CHECK_STR(o, "alpha\nbeta\ngamma!\n"); free(o);
+    long r2, c2;
+    edit_endpos(2, 3, "xy", 2, &r2, &c2); CHECK_INT(r2, 2); CHECK_INT(c2, 5);
+    edit_endpos(2, 3, "x\ny\xC3\xA9", 5, &r2, &c2); CHECK_INT(r2, 3); CHECK_INT(c2, 3);   /* two code points after the newline */
+    edit_endpos(2, 3, "", 0, &r2, &c2); CHECK_INT(r2, 2); CHECK_INT(c2, 3);
+    edit_endpos(2, 3, "a\n", 2, &r2, &c2); CHECK_INT(r2, 3); CHECK_INT(c2, 1);
+}
+
 int main(void) {
     testlib_init_noserver();
     static const testcase tests[] = {
@@ -174,6 +215,8 @@ int main(void) {
         { "json_put_string_and_number", t_json_put_string_and_number, 0 },
         { "json_getters", t_json_getters, 0 },
         { "file_reading", t_file_reading, 0 },
+        { "edit_offset", t_edit_offset, 0 },
+        { "edit_replace_and_endpos", t_edit_replace_and_endpos, 0 },
     };
     return run_tests(tests, sizeof tests / sizeof *tests) ? 1 : 0;
 }

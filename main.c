@@ -6,16 +6,16 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-    int port = DEFAULT_PORT;
+    int port = DEFAULT_PORT, explicit_port = 0;
     const char *env = getenv("WINLESS_PORT");
-    if (env && *env) port = atoi(env);
+    if (env && *env) { port = atoi(env); explicit_port = 1; }
     int i = 1;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
-        if (!strcmp(argv[i], "--port") && i + 1 < argc) { port = atoi(argv[i + 1]); i += 2; }
+        if (!strcmp(argv[i], "--port") && i + 1 < argc) { port = atoi(argv[i + 1]); explicit_port = 1; i += 2; }
         else if (!strcmp(argv[i], "--version")) { puts("winless " PACKAGE_VERSION); return 0; }
-        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { char *h[] = { "help", NULL }; return client_main(port, 1, h); }
+        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { char *h[] = { "help", NULL }; return client_main(port, 1, 1, h); }
         else { fprintf(stderr, "winless: unknown option %s (try --help)\n", argv[i]); return 2; }
     }
     if (port < 1 || port > 65535) { fprintf(stderr, "winless: bad port\n"); return 2; }
-    return client_main(port, argc - i, argv + i);
+    return client_main(port, explicit_port, argc - i, argv + i);
 }

@@ -1,5 +1,22 @@
 winless NEWS -- history of user-visible changes
 
+* Unreleased
+  Every write keeps the old file (~/.local/share/winless/history) so any change can be reverted: `history`, `revert [N]`, and :history /
+  :revert in the window.  A revert is itself a write, so it can be reverted; a write that cannot keep a copy is refused.
+  One server per window: every `open` starts its own server on a port chosen at launch, so opening a window never changes another.
+  New: `windows`, `open --new`, `open --here`, `stop --all`; a file already open is not opened twice; with several windows open a
+  command asks which (a terminal) or lists them and exits 2.  A window's server ends with the window, as quitting vim does: at once
+  on :q!, :wq or q, and a minute after the window is closed; unsaved edits are discarded then, and closing a window that has them
+  asks first.  `open --here` and `stop` refuse while there are unsaved edits (--force discards them).
+  Editing: an always-visible block cursor with vim motions (hjkl by screen row, w b e 0 $ ( ) { } gg G), v / V / mouse visual mode,
+  d c y with motions and text objects (cw dd ciw cis dip x D C Y), counts, i a I A o O (typed in a bottom panel), r J p u Ctrl-r,
+  :s substitute with ranges, and :w :q :wq.  New commands: redo, ex, type.  The server owns the text, keeps an
+  undo stack, and writes atomically, refusing to overwrite a file that changed on disk.  New commands: edit, undo, write.
+  The viewer reports its state right after every command (browsers throttle timers in a window that is not in front).
+  Lines taller than the window are scrolled through row by row; scrolling is by screen rows throughout.
+  Keys now follow vim: n/N (and the next/prev commands) wrap around at the ends of the file, h/l (or the arrow keys)
+  scroll sideways when lines are chopped, Ctrl-d/u/f/b/e/y scroll, gg goes to the top. Help moved from h to F1 or :help.
+
 * Version 0.2.0
   (This program was called winview until 2026-11-03; it is now winless -- "less" in its own Windows window.
   Renamed: the command, man page, WINVIEW_* environment variables (now WINLESS_*), and ~/.cache/winview (now

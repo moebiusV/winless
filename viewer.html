@@ -6,19 +6,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
-          --cur:#b3541e; --curfg:#fff; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
+          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
   :root.light { --bg:#fbfaf6; --fg:#22252a; --dim:#7a7468; --bar:#e8e3d6; --mark:#fff0a8; --hl:#cfe3ff;
-          --cur:#ffb27a; --curfg:#000; }
+          --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden; }
-  #view { position:absolute; left:0; right:0; top:0; bottom:var(--barh,28px); overflow:hidden; padding:2px 10px;
+  #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
           font:var(--size)/1.38 var(--font); box-sizing:border-box; }
   .line { white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; min-height:1.38em; }
   .chop .line { white-space:pre; overflow:hidden; text-overflow:clip; }
-  .ln { display:inline-block; min-width:var(--lnw,4ch); margin-right:1.2ch; color:var(--dim); text-align:right;
+  .ln { position:sticky; left:0; z-index:1; background:var(--bg); display:inline-block; min-width:var(--lnw,4ch); margin-right:1.2ch; color:var(--dim); text-align:right;
         unicode-bidi:isolate; user-select:none; }
   .mk { background:var(--mark); }
   .hit { background:var(--hl); border-radius:2px; }
   .cur { background:var(--cur); color:var(--curfg); border-radius:2px; }
+  .sel { background:var(--sel); }
+  .vcur { background:var(--vcur); color:#000; box-shadow:0 2px 0 var(--vcur), 0 -1px 0 var(--vcur); }   /* a steady block, as tall as the row */
+  .selrow { background:var(--sel); }
+  #panel { display:none; position:absolute; left:0; right:0; bottom:var(--barh,28px); background:var(--bar); padding:6px 10px;
+           box-sizing:border-box; border-top:1px solid var(--dim); }
+  #panel .title { color:var(--dim); font:12px var(--font); height:18px; }
+  #panel textarea { width:100%; height:calc(100% - 20px); background:var(--bg); color:var(--fg); border:1px solid var(--dim);
+                    font:var(--size)/1.38 var(--font); resize:none; box-sizing:border-box; outline:0; }
+  #bar .mode { color:#e0b050; font-weight:bold; }
   #measure { position:absolute; visibility:hidden; left:0; right:0; top:0; height:auto; overflow:visible; padding:2px 10px;
              font:var(--size)/1.38 var(--font); box-sizing:border-box; pointer-events:none; }
   #bar { position:absolute; left:0; right:0; bottom:0; height:var(--barh,28px); background:var(--bar); color:var(--fg);
@@ -42,14 +51,15 @@
 <div id="measure"></div>
 <div id="help"></div>
 <div id="flash"></div>
-<div id="bar"><span class="name" id="bname"></span><span class="pos" id="bpos"></span><span class="srch" id="bsrch"></span>
+<div id="panel"><div class="title" id="ptitle"></div><textarea id="ptxt" spellcheck="false"></textarea></div>
+<div id="bar"><span class="mode" id="bmode"></span><span class="name" id="bname"></span><span class="pos" id="bpos"></span><span class="srch" id="bsrch"></span>
   <span id="prompt"><span id="pch">/</span><input id="pin" autocomplete="off" spellcheck="false"></span></div>
 
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 const view = $("view"), measure = $("measure");
-const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true,
+const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, dirty: false, undo: 0, path: null,
             search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false };
 let sentTimer = null, closedSent = false;
 
@@ -66,11 +76,22 @@ function colorVar(c) { return { yellow:"#7a6a00", red:"#7a2a2a", green:"#245a2a"
 function lineNode(i) {
   const d = document.createElement("div"); d.className = "line"; d.dir = "auto"; d.dataset.i = i;
   const text = S.lines[i];
+  if (selectedRow(i)) d.classList.add("selrow");
   if (S.numbers) { const n = document.createElement("span"); n.className = "ln"; n.textContent = i + 1; d.appendChild(n); }
   const ranges = [];
   const add = (re, cls) => { re.lastIndex = 0; let m; while ((m = re.exec(text)) && m[0] !== "") { ranges.push([m.index, m.index + m[0].length, cls]); if (re.lastIndex === m.index) re.lastIndex++; } };
   for (const h of S.hls) add(h.re, "hl:" + (h.color || ""));
   if (S.search) add(S.search.re, i === S.curLine ? "cur" : "hit");
+  { const vr = visRangesFor(i), cr = vr.find(r => r[2] === "vcur");       // the cursor block always shows: split other highlights around it
+    for (const r of vr) if (r[2] !== "vcur") ranges.push(r);
+    if (cr) {
+      const out = [];
+      for (const r of ranges) {
+        if (r[1] <= cr[0] || r[0] >= cr[1]) out.push(r);
+        else { if (r[0] < cr[0]) out.push([r[0], cr[0], r[2]]); if (r[1] > cr[1]) out.push([cr[1], r[1], r[2]]); }
+      }
+      ranges.length = 0; for (const r of out) ranges.push(r); ranges.push(cr);
+    } }
   ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
   let pos = 0;
   const put = (s, e, cls) => {
@@ -82,7 +103,10 @@ function lineNode(i) {
   };
   for (const r of ranges) { if (r[0] < pos) continue; put(pos, r[0], null); put(r[0], r[1], r[2]); pos = r[1]; }
   put(pos, text.length, null);
-  if (!text) d.appendChild(document.createTextNode("​"));
+  if (!text) {
+    if (i === S.cur.r) { const sp = document.createElement("span"); sp.className = "vcur"; sp.textContent = "\u00a0"; d.appendChild(sp); }
+    else d.appendChild(document.createTextNode("\u200b"));
+  }
   for (const m of S.marks) if (i + 1 >= m.a && i + 1 <= m.b) { d.classList.add("mk"); if (m.color) d.style.background = colorVar(m.color); }
   return d;
 }
@@ -94,9 +118,10 @@ function fitFrom(top) {              // render forward from `top`; returns index
     const frag = document.createDocumentFragment(); const end = Math.min(total(), i + 40);
     for (let k = i; k < end; k++) frag.appendChild(lineNode(k));
     view.appendChild(frag);
+    if (i === top && S.off) view.firstChild.style.marginTop = -S.off + "px";   // scrolled part-way into a tall line
     const kids = view.children; let cut = -1;
     for (let k = 0; k < kids.length; k++) { if (kids[k].offsetTop - view.offsetTop + kids[k].offsetHeight > H + 2) { cut = k; break; } }
-    if (cut >= 0) { while (view.children.length > Math.max(cut, 1)) view.removeChild(view.lastChild); break; }
+    if (cut >= 0) { while (view.children.length > cut + 1) view.removeChild(view.lastChild); break; }   // keep the crossing line, clipped
   }
   last = top + view.children.length - 1;
   return last;
@@ -117,9 +142,13 @@ function topForBottom(endIdx) {      // smallest top such that lines top..endIdx
 function render() {
   S.top = clamp(S.top, 0, Math.max(0, total() - 1));
   S.bottom = total() ? fitFrom(S.top) : -1;
-  S.atEnd = S.bottom >= total() - 1;
+  { const f0 = view.firstElementChild;
+    if (f0 && S.off >= f0.offsetHeight - 0.5) { S.off = 0; S.bottom = fitFrom(S.top); } }   // e.g. after a resize
+  if (pullCursor()) S.bottom = fitFrom(S.top);
+  const E = endPos(); S.atEnd = S.top > E.top || (S.top === E.top && S.off >= E.off - 0.5);
+  applyHx();
   const n = total(), shown = S.bottom - S.top + 1;
-  $("bname").textContent = S.name || "(no file)";
+  $("bname").textContent = (S.name || "(no file)") + (S.dirty ? " [+]" : "");
   $("bpos").innerHTML = "";
   const pos = $("bpos");
   if (!n) pos.textContent = "(empty)";
@@ -132,16 +161,61 @@ function render() {
   scheduleState();
 }
 
+/* ---------- horizontal scroll (chop mode) ---------- */
+function applyHx() { for (const d of view.children) d.scrollLeft = S.wrap ? 0 : S.hx; }
+function hscroll(dir) {
+  if (S.wrap) { flash("lines are wrapped; press w to chop, then h / l scroll sideways"); return; }
+  const step = Math.round(8 * 0.6 * parseFloat(getComputedStyle(view).fontSize));
+  S.hx = dir === 0 ? 0 : Math.max(0, S.hx + dir * step); applyHx();
+}
+
 /* ---------- movement ---------- */
-function lineDown(n = 1) { if (S.atEnd) { flash("(END)"); return; } S.top = Math.min(S.top + n, total() - 1); render(); }
-function lineUp(n = 1) { S.top = Math.max(0, S.top - n); render(); }
-function pageDown(frac = 1) { if (S.atEnd) { flash("(END)"); return; } const shown = Math.max(1, S.bottom - S.top + 1); S.top = clamp(frac === 1 ? S.bottom + 1 : S.top + Math.max(1, Math.floor(shown * frac)), 0, total() - 1); render(); }
-function pageUp(frac = 1) { if (S.top === 0) { flash("(TOP)"); return; } const shown = Math.max(1, S.bottom - S.top + 1);
-  S.top = frac === 1 ? topForBottom(S.top - 1) : Math.max(0, S.top - Math.max(1, Math.floor(shown * frac))); S.top = Math.min(S.top, Math.max(0, total() - 1)); render(); }
-function gotoLine(n) { S.top = clamp(n - 1, 0, Math.max(0, total() - 1)); render(); }
-function gotoTop() { S.top = 0; render(); }
-function gotoBottom() { S.top = topForBottom(total() - 1); render(); }
-function gotoPercent(p) { S.top = clamp(Math.floor(total() * p / 100), 0, Math.max(0, total() - 1)); render(); }
+/* Scrolling is by screen rows, as in less: a logical line that wraps over several rows is walked through row by row.
+   The position is (S.top = logical line, S.off = pixels scrolled into it). */
+function vh() { return view.clientHeight - 4; }
+function rowH() {                    // height of one screen row of text
+  measure.className = S.wrap ? "" : "chop"; measure.textContent = "";
+  const d = document.createElement("div"); d.className = "line"; d.textContent = "x"; measure.appendChild(d);
+  const h = d.getBoundingClientRect().height; measure.textContent = ""; return h || 20;
+}
+function lineH(i) {                  // rendered height of logical line i
+  measure.className = S.wrap ? "" : "chop"; measure.textContent = "";
+  const d = lineNode(i); measure.appendChild(d); const h = d.getBoundingClientRect().height; measure.textContent = ""; return h;
+}
+function endPos() {                  // the position that puts the last row of the file at the bottom of the window
+  const H = vh(); measure.className = S.wrap ? "" : "chop"; measure.textContent = "";
+  for (let i = total() - 1; i >= 0; i--) {
+    measure.insertBefore(lineNode(i), measure.firstChild);
+    const h = measure.getBoundingClientRect().height - 4;
+    if (h >= H - 0.5) { measure.textContent = ""; return { top: i, off: Math.max(0, h - H) }; }
+  }
+  measure.textContent = ""; return { top: 0, off: 0 };
+}
+function scrollBy(px) {              // move the window by px pixels (positive = down) through real screen rows
+  const E = endPos(); let top = S.top, off = S.off;
+  if (px > 0) {
+    let rem = px;
+    while (rem > 0.5 && top < total()) {
+      const h = lineH(top);
+      if (off + rem < h - 0.5) { off += rem; rem = 0; } else { rem -= (h - off); off = 0; top++; }
+      if (top > E.top || (top === E.top && off >= E.off)) { top = E.top; off = E.off; break; }
+    }
+  } else {
+    let rem = -px;
+    if (off >= rem - 0.5) { off = Math.max(0, off - rem); rem = 0; } else { rem -= off; off = 0; }
+    while (rem > 0.5 && top > 0) { top--; const h = lineH(top); if (rem <= h + 0.5) { off = Math.max(0, h - rem); rem = 0; } else rem -= h; }
+  }
+  S.top = clamp(top, 0, Math.max(0, total() - 1)); S.off = off < 0.5 ? 0 : off; render();
+}
+function pageRows(frac) { return Math.max(1, Math.round(Math.max(1, Math.floor(vh() / rowH())) * frac)) * rowH(); }
+function lineDown(n = 1) { if (S.atEnd) { flash("(END)"); return; } scrollBy(n * rowH()); }
+function lineUp(n = 1) { if (S.top === 0 && S.off === 0) return; scrollBy(-n * rowH()); }
+function pageDown(frac = 1) { if (S.atEnd) { flash("(END)"); return; } scrollBy(pageRows(frac)); }
+function pageUp(frac = 1) { if (S.top === 0 && S.off === 0) { flash("(TOP)"); return; } scrollBy(-pageRows(frac)); }
+function gotoLine(n) { S.top = clamp(n - 1, 0, Math.max(0, total() - 1)); S.off = 0; render(); }
+function gotoTop() { S.top = 0; S.off = 0; render(); }
+function gotoBottom() { const E = endPos(); S.top = E.top; S.off = E.off; render(); }
+function gotoPercent(p) { S.top = clamp(Math.floor(total() * p / 100), 0, Math.max(0, total() - 1)); S.off = 0; render(); }
 
 /* ---------- search ---------- */
 function doSearch(pattern, back = false, quiet = false) {
@@ -157,12 +231,18 @@ function stepMatch(dir, first = false, quiet = false) {
   let next = -1;
   if (dir > 0) { next = S.matchLines.find(i => i > ref); if (next === undefined) next = -1; }
   else { for (let k = S.matchLines.length - 1; k >= 0; k--) if (S.matchLines[k] < ref) { next = S.matchLines[k]; break; } }
-  if (next < 0) { if (!quiet) flash("Pattern not found (no more matches)"); render(); return false; }
-  S.curLine = next; S.top = next; render(); return true;
+  if (next < 0) {                    // wrapscan, as in vim: continue from the other end
+    next = dir > 0 ? S.matchLines[0] : S.matchLines[S.matchLines.length - 1];
+    if (!quiet) flash(dir > 0 ? "search hit BOTTOM, continuing at TOP" : "search hit TOP, continuing at BOTTOM");
+  }
+  S.curLine = next; S.top = next; S.off = 0;
+  { const text = S.lines[next] || "", probe = new RegExp(S.search.re.source, S.search.re.flags.replace("g", "")), m = probe.exec(text);
+    S.cur = { r: next, c: m ? Array.from(text.slice(0, m.index)).length : 0 }; S.goalX = null; }
+  render(); return true;
 }
 
 /* ---------- prompt ---------- */
-function openPrompt(ch) { S.prompt = ch; $("pch").textContent = ch; $("prompt").style.display = "flex"; $("bname").style.display = "none"; $("bpos").style.display = "none"; $("bsrch").style.display = "none"; const i = $("pin"); i.value = ""; i.focus(); }
+function openPrompt(ch, prefill) { S.prompt = ch; $("pch").textContent = ch; $("prompt").style.display = "flex"; $("bname").style.display = "none"; $("bpos").style.display = "none"; $("bsrch").style.display = "none"; const i = $("pin"); i.value = prefill || ""; i.focus(); }
 function closePrompt() { S.prompt = null; $("prompt").style.display = "none"; for (const id of ["bname", "bpos", "bsrch"]) $(id).style.display = ""; $("pin").blur(); document.body.focus(); }
 $("pin").addEventListener("keydown", e => {
   if (e.key === "Escape") { closePrompt(); e.preventDefault(); }
@@ -170,30 +250,537 @@ $("pin").addEventListener("keydown", e => {
   e.stopPropagation();
 });
 function runPrompt(ch, v) {
-  if (ch === "/") doSearch(v, false); else if (ch === "?") doSearch(v, true);
+  if (ch === "/") { if (S.vis) visSearch(v); else doSearch(v, false); } else if (ch === "?") doSearch(v, true);
   else if (ch === ":") {
     v = v.trim(); let m;
-    if (v === "q" || v === "quit") quit();
+    if ((m = /^([%*.$0-9,'<>]*)s([^\w\s\\"|].*)$/.exec(v))) { substitute(m[1], m[2][0], m[2].slice(1)); return; }
+    if (v === "q" || v === "quit") tryQuit(false); else if (v === "q!") tryQuit(true);
+    else if (v === "w") writeFile(false); else if (v === "w!") writeFile(true);
+    else if (v === "history") showHistory(); else if ((m = /^revert(!?)(?:\s+(\d+))?$/.exec(v))) revertFile(m[2] ? +m[2] : 0, !!m[1]);
+    else if (v === "wq" || v === "x") writeFile(false).then(ok => { if (ok) quit(); });
     else if ((m = v.match(/^(\d+)$/))) gotoLine(+m[1]);
     else if ((m = v.match(/^(\d+)%$/))) gotoPercent(+m[1]);
+    else if (v === "help" || v === "h") toggleHelp(true);
     else if (v === "set numbers" || v === "N") toggleNumbers(); else if (v === "set wrap") toggleWrap(); else flash("Unknown command: " + v);
   }
 }
 
+/* ---------- cursor, visual mode and editing ---------- */
+/* Positions are [row, col]: row = logical line from 0, col = code point from 0.  The cursor S.cur is always drawn as a
+   block (it never blinks).  Visual mode is an anchor S.vis = { mode, ar, ac } plus the cursor.  The server wants rows from 1,
+   columns from 1 and an end that is excluded (see rangeOf). */
+const cpCache = new Map();
+function lcp(i) { let a = cpCache.get(i); const t = S.lines[i] || ""; if (!a || a.s !== t) { a = Array.from(t); a.s = t; cpCache.set(i, a); } return a; }
+const WORDCH = /[\p{L}\p{N}_]/u, SPACECH = /\s/;
+function cls(ch) { return ch === undefined ? 0 : SPACECH.test(ch) ? 1 : WORDCH.test(ch) ? 2 : 3; }
+function cmpPos(a, b) { return a[0] - b[0] || a[1] - b[1]; }
+
+function setMode() {
+  const pend = (S.count || "") + (S.op || "") + (S.pend || "");
+  $("bmode").textContent = S.vis ? (S.vis.mode === "V" ? "-- VISUAL LINE --" : "-- VISUAL --") + (S.count ? " " + S.count : "") : pend ? pend + " …" : "";
+}
+function visRange() {
+  let a = [S.vis.ar, S.vis.ac], h = [S.cur.r, S.cur.c];
+  if (cmpPos(a, h) > 0) [a, h] = [h, a];
+  return { sr: a[0], sc: a[1], er: h[0], ec: h[1] };
+}
+function visRangesFor(i) {           // [start, end, class] in UTF-16 units of line i: the selection, with the cursor block drawn over it
+  const u0 = a => k => a.slice(0, k).join("").length;
+  const a = lcp(i), n = a.length, u = u0(a), cur = (i === S.cur.r && n) ? Math.min(S.cur.c, n - 1) : -1;
+  if (!S.vis) return cur >= 0 ? [[u(cur), u(cur + 1), "vcur"]] : [];
+  const R = visRange(); if (i < R.sr || i > R.er) return cur >= 0 ? [[u(cur), u(cur + 1), "vcur"]] : [];
+  let s = 0, e = n;
+  if (S.vis.mode === "v") { if (i === R.sr) s = R.sc; if (i === R.er) e = R.ec + 1; }
+  s = Math.min(s, n); e = Math.min(e, n);
+  const out = [];
+  if (cur >= s && cur < e) { if (cur > s) out.push([u(s), u(cur), "sel"]); out.push([u(cur), u(cur + 1), "vcur"]); if (cur + 1 < e) out.push([u(cur + 1), u(e), "sel"]); }
+  else { if (e > s) out.push([u(s), u(e), "sel"]); if (cur >= 0) out.push([u(cur), u(cur + 1), "vcur"]); }
+  return out;
+}
+function selectedRow(i) {            // is line i inside the selection as a whole row (line mode, or an empty line)?
+  if (!S.vis) return false; const R = visRange();
+  return i >= R.sr && i <= R.er && (S.vis.mode === "V" || (S.lines[i] || "") === "");
+}
+
+function setCursor(r, c, keepGoal) {
+  r = clamp(r, 0, Math.max(0, total() - 1));
+  S.cur = { r, c: clamp(c, 0, Math.max(0, lcp(r).length - 1)) };
+  if (!keepGoal) S.goalX = null;
+  render(); keepCursorVisible();
+}
+function keepCursorVisible() {       // scroll so the cursor is on screen, including inside a paragraph taller than the window
+  S.keeping = true;
+  try {
+    if (S.cur.r < S.top || S.cur.r > S.bottom) { S.top = S.cur.r; S.off = 0; render(); }
+    const el = view.querySelector(".vcur");
+    if (el) {
+      const vr = view.getBoundingClientRect(), r = el.getBoundingClientRect(), m = rowH() * 2;
+      if (r.bottom > vr.bottom - 2) scrollBy(r.bottom - vr.bottom + m); else if (r.top < vr.top + 2) scrollBy(r.top - vr.top - m);
+    }
+  } finally { S.keeping = false; }
+}
+function pullCursor() {              // the view scrolled by itself: keep the cursor on a line that is showing
+  if (S.keeping || !total()) return false;
+  let r = S.cur.r;
+  if (r < S.top) r = S.top; else if (r > S.bottom) r = S.bottom > S.top ? S.bottom - 1 : S.bottom;
+  if (r === S.cur.r) return false;
+  S.cur = { r, c: 0 }; S.goalX = null; return true;
+}
+
+/* moving by screen row: use the layout itself, so a wrapped paragraph is walked row by row */
+function caretAt(x, y) {
+  let node, off;
+  if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); if (!p) return null; node = p.offsetNode; off = p.offset; }
+  else if (document.caretRangeFromPoint) { const p = document.caretRangeFromPoint(x, y); if (!p) return null; node = p.startContainer; off = p.startOffset; }
+  else return null;
+  return domPos(node, off);
+}
+function moveRow(dir) {
+  keepCursorVisible();
+  let rc = view.querySelector(".vcur"); if (!rc) return;
+  rc = rc.getBoundingClientRect();
+  const rh = rowH(), vr = view.getBoundingClientRect();
+  if (S.goalX == null) S.goalX = rc.left + 1;
+  const targetY = () => (dir > 0 ? rc.bottom + rh / 2 : rc.top - rh / 2);
+  let y = targetY();
+  if (y > vr.bottom - 2 || y < vr.top + 2) {            // the next row is off screen: scroll one row, then look again
+    S.keeping = true; scrollBy(dir * rh); S.keeping = false;
+    const el = view.querySelector(".vcur"); if (!el) return;
+    rc = el.getBoundingClientRect(); y = targetY();
+  }
+  const pos = caretAt(Math.min(S.goalX, vr.right - 14), clamp(y, vr.top + 1, vr.bottom - 1));
+  if (!pos) return;
+  const here = [S.cur.r, S.cur.c], there = [pos.r, pos.c];
+  if ((dir > 0 && cmpPos(there, here) < 0) || (dir < 0 && cmpPos(there, here) > 0)) return;      // no row beyond: stay
+  const g = S.goalX; setCursor(pos.r, pos.c, true); S.goalX = g;
+}
+
+/* word and sentence motions on code-point arrays */
+function nextWord(r, c) {
+  const a = lcp(r); let i = c; const k0 = cls(a[i]);
+  if (k0 !== 1) while (i < a.length && cls(a[i]) === k0) i++;
+  while (i < a.length && cls(a[i]) === 1) i++;
+  if (i >= a.length) return r < total() - 1 ? [r + 1, 0] : [r, a.length];
+  return [r, i];
+}
+function prevWord(r, c) {
+  const a = lcp(r); let i = c - 1;
+  while (i >= 0 && cls(a[i]) === 1) i--;
+  if (i < 0) { if (r === 0) return [0, 0]; const pl = lcp(r - 1).length; return pl === 0 ? [r - 1, 0] : prevWord(r - 1, pl); }   // an empty line is a stop, as in vim
+  const k = cls(a[i]); while (i > 0 && cls(a[i - 1]) === k) i--;
+  return [r, i];
+}
+function endWord(r, c) {
+  const a = lcp(r); let i = c + 1;
+  while (i < a.length && cls(a[i]) === 1) i++;
+  if (i >= a.length) return r < total() - 1 ? endWord(r + 1, -1) : [r, Math.max(0, a.length - 1)];
+  const k = cls(a[i]); while (i + 1 < a.length && cls(a[i + 1]) === k) i++;
+  return [r, i];
+}
+function sentStarts(a) {             // code-point indices where a sentence begins: after . ! ? (and closing quotes) and spaces
+  const out = [0], n = a.length;
+  for (let i = 0; i < n; i++) {
+    if (a[i] === "." || a[i] === "!" || a[i] === "?") {
+      let j = i + 1; while (j < n && /["')\]”’]/.test(a[j])) j++;
+      if (j < n && cls(a[j]) === 1) { while (j < n && cls(a[j]) === 1) j++; if (j < n) { out.push(j); i = j - 1; } }
+    }
+  }
+  return out;
+}
+function nextSentence(r, c) { const s = sentStarts(lcp(r)).find(x => x > c); return s !== undefined ? [r, s] : (r < total() - 1 ? [r + 1, 0] : [r, lcp(r).length]); }
+function prevSentence(r, c) {
+  const s = sentStarts(lcp(r)).filter(x => x < c);
+  if (s.length) return [r, s[s.length - 1]];
+  if (r === 0) return [0, 0]; const p = sentStarts(lcp(r - 1)); return [r - 1, p[p.length - 1]];
+}
+function prevPos(p) { if (p[1] > 0) return [p[0], p[1] - 1]; if (p[0] > 0) return [p[0] - 1, Math.max(0, lcp(p[0] - 1).length - 1)]; return p; }
+
+/* A motion as a destination: { to: [row, col], incl: the destination character is included when an operator uses it,
+   line: the operator works on whole lines }.  null if k is not a motion. */
+function motionDest(k) {
+  const r = S.cur.r, c = S.cur.c, n = lcp(r).length;
+  switch (k) {
+    case "h": case "ArrowLeft": return { to: [r, Math.max(0, c - 1)], incl: false };
+    case "l": case "ArrowRight": return { to: [r, Math.min(c + 1, n)], incl: false };
+    case "0": case "Home": return { to: [r, 0], incl: false };
+    case "$": case "End": return { to: [r, Math.max(0, n - 1)], incl: true };
+    case "w": return { to: nextWord(r, c), incl: false };
+    case "b": return { to: prevWord(r, c), incl: false };
+    case "e": return { to: endWord(r, c), incl: true };
+    case ")": return { to: nextSentence(r, c), incl: false };
+    case "(": return { to: prevSentence(r, c), incl: false };
+    case "}": return { to: [Math.min(r + 1, total() - 1), 0], incl: false, line: true };
+    case "{": return { to: [Math.max(r - 1, 0), 0], incl: false, line: true };
+    case "G": return { to: [Math.max(0, total() - 1), 0], incl: false, line: true };
+    case "gg": return { to: [0, 0], incl: false, line: true };
+  }
+  return null;
+}
+function opRange(m) {                // what an operator covers for a motion: { mode, a, b } with b included, or null when empty
+  const cur = [S.cur.r, S.cur.c];
+  if (m.line) { const r1 = Math.min(cur[0], m.to[0]), r2 = Math.max(cur[0], m.to[0]); return { mode: "V", a: [r1, 0], b: [r2, 0] }; }
+  const d = cmpPos(m.to, cur);
+  if (d >= 0) { if (!m.incl && d === 0) return null; const b = m.incl ? m.to : prevPos(m.to); return cmpPos(b, cur) < 0 ? null : { mode: "v", a: cur, b }; }
+  return { mode: "v", a: m.to, b: prevPos(cur) };
+}
+function objRange(which, obj) {      // text objects: iw aw is as ip ap
+  const r = S.cur.r, c = S.cur.c, a = lcp(r), n = a.length;
+  if (obj === "p") return { mode: "V", a: [r, 0], b: [r, 0] };
+  if (!n) return null;
+  if (obj === "w") {
+    const k = cls(a[c]); let s = c, e = c;
+    while (s > 0 && cls(a[s - 1]) === k) s--; while (e + 1 < n && cls(a[e + 1]) === k) e++;
+    if (which === "a") while (e + 1 < n && cls(a[e + 1]) === 1) e++;
+    return { mode: "v", a: [r, s], b: [r, e] };
+  }
+  if (obj === "s") {
+    const st = sentStarts(a); let i = st.length - 1; while (i > 0 && st[i] > c) i--;
+    const s = st[i]; let e = (i + 1 < st.length ? st[i + 1] : n) - 1;
+    if (which === "i") while (e > s && cls(a[e]) === 1) e--;
+    return { mode: "v", a: [r, s], b: [r, e] };
+  }
+  return null;
+}
+
+function rangeOf(mode, a, b) {       // what the server wants: rows and columns from 1, end excluded (a <= b, b included)
+  if (mode === "V") return { r1: a[0] + 1, c1: 1, r2: b[0] + 2, c2: 1 };
+  return { r1: a[0] + 1, c1: Math.min(a[1], lcp(a[0]).length) + 1, r2: b[0] + 1, c2: Math.min(b[1] + 1, lcp(b[0]).length) + 1 };
+}
+function textOf(mode, a, b) {
+  const parts = [];
+  for (let r = a[0]; r <= b[0]; r++) {
+    const x = lcp(r); let s = 0, e = x.length;
+    if (mode === "v") { if (r === a[0]) s = a[1]; if (r === b[0]) e = b[1] + 1; }
+    parts.push(x.slice(s, Math.min(e, x.length)).join(""));
+  }
+  return parts.join("\n") + (mode === "V" ? "\n" : "");
+}
+
+async function sendCmd(obj) {
+  try { const r = await fetch("/cmd", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) }); return await r.json(); }
+  catch (e) { return { ok: false, error: String(e) }; }
+}
+function noteResult(j) { if (j.dirty !== undefined) S.dirty = !!j.dirty; if (j.undo !== undefined) S.undo = j.undo; if (j.redo !== undefined) S.redo = j.redo; }
+async function doEdit(rg, text) {
+  const j = await sendCmd({ cmd: "edit", r1: rg.r1, c1: rg.c1, r2: rg.r2, c2: rg.c2, text });
+  if (!j.ok) flash("edit failed: " + j.error); noteResult(j); return !!j.ok;
+}
+async function undoEdit() { const j = await sendCmd({ cmd: "undo" }); if (!j.ok) flash(j.error); noteResult(j); }
+async function writeFile(force) {
+  const j = await sendCmd({ cmd: "write", force: !!force });
+  noteResult(j); flash(j.ok ? "written" : "not written: " + j.error); render(); return !!j.ok;
+}
+function tryQuit(force) { if (S.dirty && !force) flash("unsaved changes: :wq saves and quits, :q! discards them and quits"); else quit(); }
+function setRegister(text, linewise) {
+  S.reg = { text, linewise };
+  try { navigator.clipboard.writeText(text).catch(() => {}); } catch (e) {}
+}
+
+/* operators: y yank, d delete, c change (opens the bottom panel), p replace with the register */
+function runOp(kind, mode, a, b) {
+  const rg = rangeOf(mode, a, b), t = textOf(mode, a, b), lw = mode === "V";
+  S.cur = { r: a[0], c: a[1] }; S.goalX = null;
+  if (kind === "y") { setRegister(t, lw); flash(lw ? "yanked " + (t.split("\n").length - 1) + " line(s)" : "yanked " + Array.from(t).length + " characters"); render(); }
+  else if (kind === "d") { setRegister(t, lw); doEdit(rg, ""); }
+  else if (kind === "p") { if (!S.reg) { flash("nothing yanked or deleted yet"); return; } doEdit(rg, S.reg.text); }
+  else if (kind === "c") {
+    openPanel("change: Ctrl-Enter applies, Esc cancels", t.replace(/\n$/, ""), txt => doEdit(rg, lw && !txt.endsWith("\n") ? txt + "\n" : txt));
+  }
+}
+function pendingOperator(k) {        // after d / c / y: a motion, a text object, or the same key again (the current line)
+  const op = S.op;
+  if (S.pend === "i" || S.pend === "a") {
+    const which = S.pend; S.op = null; S.pend = null; S.count = 0; setMode();
+    const o = objRange(which, k); if (o) runOp(op, o.mode, o.a, o.b); else flash("no such text object");
+    return true;
+  }
+  if (S.pend === "g") { S.pend = null; if (k !== "g") { S.op = null; S.count = 0; setMode(); return true; } k = "gg"; }
+  if (countKey(k)) return true;
+  if (k === "Escape") { S.op = null; S.pend = null; S.count = 0; setMode(); return true; }
+  if (k === "i" || k === "a") { S.pend = k; setMode(); return true; }
+  if (k === "g") { S.pend = "g"; setMode(); return true; }
+  const n = S.opN * (S.count || 1), hadCount = S.opN > 1 || S.count > 0;
+  S.op = null; S.pend = null; S.count = 0; S.opN = 1; setMode();
+  if (k === op) { const r = S.cur.r; runOp(op, "V", [r, 0], [Math.min(r + n - 1, total() - 1), 0]); return true; }       // dd cc yy, with a count
+  let m;
+  if ((k === "G" || k === "gg") && hadCount) m = { to: [clamp(n - 1, 0, Math.max(0, total() - 1)), 0], incl: false, line: true };
+  else if (op === "c" && k === "w" && cls(lcp(S.cur.r)[S.cur.c]) !== 1) m = repeatMotion("e", n);                          // cw works like ce
+  else m = repeatMotion(k, n);
+  if (!m) { flash("no such motion"); return true; }
+  const rg = opRange(m); if (rg) runOp(op, rg.mode, rg.a, rg.b); else flash("nothing to " + (op === "y" ? "yank" : op === "d" ? "delete" : "change"));
+  return true;
+}
+
+/* keys of normal mode that are vim's; false means "not mine, fall through to the viewer keys" */
+function pendingKey(k) {             // g, z and r prefixes in normal mode
+  const p = S.pend; S.pend = null; setMode();
+  if (p === "g") {
+    if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); }
+    else if (k === "v") reselect();
+  } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); }
+  else if (p === "r") {
+    const r = S.cur.r, c = S.cur.c, n = takeCount();
+    if (k.length === 1 && lcp(r).length > c) { const end = Math.min(c + n - 1, lcp(r).length - 1); doEdit(rangeOf("v", [r, c], [r, end]), k.repeat(end - c + 1)); }
+  }
+  return true;
+}
+function normKey(k) {
+  if (S.op) return pendingOperator(k);
+  if (S.pend) return pendingKey(k);
+  if (countKey(k)) return true;
+  switch (k) {
+    case "h": case "ArrowLeft": case "l": case "ArrowRight": case "0": case "Home": case "$": case "End":
+    case "w": case "b": case "e": case ")": case "(": case "}": case "{": moveBy(k, takeCount()); return true;
+    case "G": { const row = gotoRow(0, "G"); setCursor(row, 0); return true; }
+    case "j": case "ArrowDown": case "Enter": case "k": case "ArrowUp": moveBy(k, takeCount()); return true;
+    case "g": case "z": case "r": S.pend = k; setMode(); return true;
+    case "v": startVisual("v"); return true;
+    case "V": startVisual("V"); return true;
+    case "y": case "d": case "c": S.op = k; S.opN = takeCount(); setMode(); return true;
+    case "Y": runOp("y", "V", [S.cur.r, 0], [Math.min(S.cur.r + takeCount() - 1, total() - 1), 0]); return true;
+    case "x": { const m = repeatMotion("l", takeCount()), rg = m && opRange(m); if (rg) runOp("d", rg.mode, rg.a, rg.b); return true; }
+    case "D": case "C": { takeCount(); const rg = opRange(motionDest("$")); if (rg) runOp(k === "D" ? "d" : "c", rg.mode, rg.a, rg.b); return true; }
+    case "i": case "a": case "A": case "I": case "o": case "O": S.count = 0; startInsert(k); return true;
+    case "J": { const r = S.cur.r; S.count = 0; if (r < total() - 1) { const n = lcp(r).length; doEdit({ r1: r + 1, c1: n + 1, r2: r + 2, c2: 1 }, n && lcp(r + 1).length ? " " : ""); } return true; }
+    case "p": S.count = 0; pasteNormal(); return true;
+    case "u": { const n = takeCount(); if (S.undo > 0) { (async () => { for (let i = 0; i < n && S.undo > 0; i++) await undoEdit(); })(); } else pageUp(0.5); return true; }
+    case "Escape": S.count = 0; setMode(); doSearch(""); return true;
+  }
+  return false;
+}
+
+function startVisual(mode) { S.vis = { mode, ar: S.cur.r, ac: S.cur.c }; S.pend = null; S.op = null; setMode(); render(); }
+function exitVisual() {
+  if (S.vis) { const R = visRange(); S.last = { mode: S.vis.mode, a: [R.sr, R.sc], b: [R.er, R.ec] }; }
+  S.vis = null; S.pend = null; setMode(); render();
+}
+function visKey(k) {
+  const v = S.vis;
+  if (S.pend === "g") {
+    S.pend = null; setMode();
+    if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); return true; }
+    if (k === "s") { flash("gs (whole-book slop review) is not built yet"); return true; }
+  }
+  const soon = what => { flash(what + " is not built yet"); return true; };
+  if (countKey(k)) return true;
+  switch (k) {
+    case "Escape": exitVisual(); return true;
+    case "v": if (v.mode === "v") exitVisual(); else { v.mode = "v"; setMode(); render(); } return true;
+    case "V": if (v.mode === "V") exitVisual(); else { v.mode = "V"; setMode(); render(); } return true;
+    case "j": case "ArrowDown": case "Enter": case "k": case "ArrowUp": moveBy(k, takeCount()); return true;
+    case "G": { const row = gotoRow(0, "G"); setCursor(row, 0); return true; }
+    case "g": S.pend = "g"; setMode(); return true;
+    case "o": { const h = [S.cur.r, S.cur.c]; S.cur = { r: v.ar, c: v.ac }; v.ar = h[0]; v.ac = h[1]; S.goalX = null; render(); keepCursorVisible(); return true; }
+    case "/": openPrompt("/"); return true;
+    case ":": exitVisual(); openPrompt(":", "'<,'>"); return true;
+    case "y": case "d": case "x": case "c": case "p": {
+      const R = visRange(), mode = v.mode; exitVisual();
+      runOp(k === "x" ? "d" : k, mode, [R.sr, R.sc], [R.er, R.ec]);                    // x deletes the selection, like d
+      return true;
+    }
+    case "n": return soon("annotating (n)");
+    case "!": return soon("filtering (!)");
+    case "s": return soon("s (slop review)");
+    case "S": return soon("S (fix the selection)");
+  }
+  if (motionDest(k)) { moveBy(k, takeCount()); return true; }
+  S.count = 0; setMode();
+  return true;                       // visual mode swallows other keys, as vim ignores unknown ones
+}
+function visSearch(pattern) {        // /pattern moves the cursor to the next match
+  if (!pattern) return;
+  let re; try { re = makeRe(pattern); } catch (e) { flash("bad pattern"); return; }
+  const probe = new RegExp(re.source, re.flags.replace("g", ""));
+  for (let r = S.cur.r; r < total(); r++) {
+    const text = S.lines[r] || "", from = r === S.cur.r ? lcp(r).slice(0, S.cur.c + 1).join("").length : 0;
+    const m = probe.exec(text.slice(from)); if (!m) continue;
+    setCursor(r, Array.from(text.slice(0, from + m.index)).length); return;
+  }
+  flash("pattern not found");
+}
+function pasteNormal() {             // paste after the cursor (after the line for a linewise register)
+  if (!S.reg) { flash("nothing yanked or deleted yet"); return; }
+  const r = S.cur.r, at = S.reg.linewise ? { r1: r + 2, c1: 1 } : { r1: r + 1, c1: Math.min(S.cur.c + 1, lcp(r).length) + 1 };
+  doEdit({ r1: at.r1, c1: at.c1, r2: at.r1, c2: at.c1 }, S.reg.text);
+}
+function reselect() {                // gv
+  if (!S.last) { flash("no previous selection"); return; }
+  S.vis = { mode: S.last.mode, ar: S.last.a[0], ac: S.last.a[1] }; S.cur = { r: S.last.b[0], c: S.last.b[1] }; setMode(); render(); keepCursorVisible();
+}
+
+function repeatMotion(k, n) {        // the destination after doing motion k n times
+  const save = S.cur; let m = null;
+  for (let i = 0; i < n; i++) {
+    const mm = motionDest(k); if (!mm) break;
+    m = mm; S.cur = { r: mm.to[0], c: Math.min(mm.to[1], lcp(mm.to[0]).length) };
+  }
+  S.cur = save; return m;
+}
+function takeCount() { const n = S.count || 1; S.count = 0; return n; }
+function countKey(k) {               // digits build a count; a leading 0 is the "start of line" motion
+  if (/^[1-9]$/.test(k) || (k === "0" && S.count)) { S.count = S.count * 10 + +k; setMode(); return true; }
+  return false;
+}
+function gotoRow(n, k) {             // G and gg: the last / first line, or line N with a count
+  const row = S.count ? clamp(S.count - 1, 0, Math.max(0, total() - 1)) : (k === "G" ? Math.max(0, total() - 1) : 0);
+  S.count = 0; return row;
+}
+function moveBy(k, n) {              // cursor motion with a count (normal and visual mode)
+  if (k === "j" || k === "ArrowDown" || k === "Enter") { for (let i = 0; i < n; i++) moveRow(1); return; }
+  if (k === "k" || k === "ArrowUp") { for (let i = 0; i < n; i++) moveRow(-1); return; }
+  const m = repeatMotion(k, n); if (m) setCursor(m.to[0], m.to[1]);
+}
+function insertPoint(k) {            // where i a A I o O put the new text: 1-based position, text before and after it, cursor row to land on
+  const r = S.cur.r, n = lcp(r).length, c = S.cur.c;
+  switch (k) {
+    case "i": return { at: [r + 1, Math.min(c, n) + 1], pre: "", post: "", land: null };
+    case "a": return { at: [r + 1, Math.min(c + 1, n) + 1], pre: "", post: "", land: null };
+    case "A": return { at: [r + 1, n + 1], pre: "", post: "", land: null };
+    case "I": return { at: [r + 1, 1], pre: "", post: "", land: null };
+    case "o": return (r === total() - 1 && !S.nl) ? { at: [r + 1, n + 1], pre: "\n", post: "", land: r + 1 } : { at: [r + 2, 1], pre: "", post: "\n", land: r + 1 };
+    case "O": return { at: [r + 1, 1], pre: "", post: "\n", land: null };
+  }
+}
+function startInsert(k) {            // type the new text in the bottom panel
+  const p = insertPoint(k);
+  openPanel("insert: Ctrl-Enter applies, Esc cancels", "", txt => {
+    if (txt === "") return;
+    if (p.land !== null) S.cur = { r: p.land, c: 0 };
+    doEdit({ r1: p.at[0], c1: p.at[1], r2: p.at[0], c2: p.at[1] }, p.pre + txt + p.post);
+  });
+}
+async function showHistory() {      // :history -- the earlier versions that writes have kept
+  const j = await sendCmd({ cmd: "history" });
+  if (!j.ok) { flash(j.error); return; }
+  const rows = (j.items || []).map(i => String(i.n).padStart(4) + "  " + i.time.replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, "$1-$2-$3 $4:$5:$6 UTC") + "  " + i.bytes + " bytes");
+  openPanel("history of " + j.path + "  --  :revert N puts one back; Esc closes", rows.length ? rows.join("\n") : "(no earlier versions kept yet)", () => {});
+}
+async function revertFile(n, force) {   // :revert [N] -- put back version N (default the latest); a revert keeps what it replaces, so it can be reverted too
+  const j = await sendCmd({ cmd: "revert", n, force });
+  noteResult(j); flash(j.ok ? "reverted" + (n ? " to version " + n : "") : "not reverted: " + j.error);
+}
+async function redoEdit() { const j = await sendCmd({ cmd: "redo" }); if (!j.ok) flash(j.error); noteResult(j); }
+
+/* :[range]s/pattern/replacement/[gi]   ranges: % . $ N N,M '<,'> * and '<> (exactly the selection).  The pattern is a JavaScript regex. */
+function parseRange(str) {
+  const cur = S.cur.r, last = Math.max(0, total() - 1);
+  if (!str) return { rows: [cur, cur] };
+  if (str === "'<>") return S.last ? { exact: true, rows: [S.last.a[0], S.last.b[0]] } : { error: "no selection" };
+  if (str === "%") return { rows: [0, last] };
+  if (str === "*") str = "'<,'>";
+  const one = t => t === "." ? cur : t === "$" ? last : /^\d+$/.test(t) ? clamp(+t - 1, 0, last) : t === "'<" ? (S.last ? S.last.a[0] : null) : t === "'>" ? (S.last ? S.last.b[0] : null) : null;
+  const m = /^('<|'>|\.|\$|\d+)(?:,('<|'>|\.|\$|\d+))?$/.exec(str); if (!m) return { error: "bad range: " + str };
+  const a = one(m[1]), b = m[2] ? one(m[2]) : a;
+  if (a === null || b === null) return { error: "no selection yet" };
+  return { rows: [Math.min(a, b), Math.max(a, b)] };
+}
+function splitSub(delim, body) {     // pattern, replacement, flags -- the delimiter may be escaped with a backslash
+  const parts = []; let cur = "", i = 0;
+  for (; i < body.length && parts.length < 2; i++) {
+    const ch = body[i];
+    if (ch === "\\" && i + 1 < body.length) { cur += body[i + 1] === delim ? delim : ch + body[i + 1]; i++; }
+    else if (ch === delim) { parts.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  if (parts.length < 2) { parts.push(cur); cur = ""; }
+  return [parts[0], parts[1] === undefined ? "" : parts[1], parts.length === 2 && i <= body.length ? body.slice(i) : ""];
+}
+function expandRep(rep, m, groups) {
+  let o = "";
+  for (let i = 0; i < rep.length; i++) {
+    const ch = rep[i];
+    if (ch === "\\" && i + 1 < rep.length) { const n = rep[++i]; o += /\d/.test(n) ? (n === "0" ? m : (groups[+n - 1] ?? "")) : n === "n" ? "\n" : n === "t" ? "\t" : n; }
+    else if (ch === "&") o += m; else o += ch;
+  }
+  return o;
+}
+async function substitute(rangeStr, delim, body) {
+  const rg = parseRange(rangeStr); if (rg.error) { flash(rg.error); return; }
+  const [pat, rep, flags] = splitSub(delim, body);
+  let re; try { re = new RegExp(pat, (flags.includes("g") ? "g" : "") + (flags.includes("i") ? "i" : "")); } catch (e) { flash("bad pattern: " + e.message); return; }
+  let count = 0;
+  const sub = t => t.replace(re, (m, ...rest) => { count++; const gi = rest.findIndex(x => typeof x === "number"); return expandRep(rep, m, gi < 0 ? [] : rest.slice(0, gi)); });
+  let range, out;
+  if (rg.exact) {
+    const a = S.last.a, b = S.last.b; out = sub(textOf(S.last.mode, a, b)); range = rangeOf(S.last.mode, a, b);
+  } else {
+    const [r1, r2] = rg.rows, lines = [];
+    for (let r = r1; r <= r2; r++) lines.push(sub(S.lines[r] || ""));
+    out = lines.join("\n"); range = { r1: r1 + 1, c1: 1, r2: r2 + 1, c2: lcp(r2).length + 1 };
+  }
+  if (!count) { flash("pattern not found: " + pat); return; }
+  S.cur = { r: rg.rows[0], c: 0 };
+  if (await doEdit(range, out)) flash(count + " substitution" + (count === 1 ? "" : "s"));
+}
+
+/* the bottom panel: a larger text box for changes */
+function openPanel(title, text, onCommit) {
+  S.panel = { onCommit }; $("ptitle").textContent = title; $("ptxt").value = text;
+  const h = Math.round(innerHeight * 0.3);
+  $("panel").style.display = "block"; $("panel").style.height = h + "px"; document.documentElement.style.setProperty("--padb", h + "px");
+  render(); $("ptxt").focus(); $("ptxt").setSelectionRange(text.length, text.length);
+}
+function closePanel() { S.panel = null; $("panel").style.display = "none"; document.documentElement.style.setProperty("--padb", "0px"); document.body.focus(); render(); keepCursorVisible(); }
+$("ptxt").addEventListener("keydown", e => {
+  if (e.key === "Escape") { closePanel(); e.preventDefault(); }
+  else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { const f = S.panel.onCommit, t = $("ptxt").value; closePanel(); f(t); e.preventDefault(); }
+  e.stopPropagation();
+});
+
+/* the mouse: a click puts the cursor there; dragging over text starts a visual selection */
+function domPos(node, offset) {
+  const base = node.nodeType === 3 ? node.parentNode : node;
+  const el = base && base.closest ? base.closest(".line") : null;
+  if (!el) return null;
+  const rg = document.createRange(); rg.setStart(el, 0); rg.setEnd(node, offset);
+  const ln = el.querySelector(".ln"), units = Math.max(0, rg.toString().length - (ln ? ln.textContent.length : 0));
+  const r = +el.dataset.i, text = S.lines[r] || "";
+  return { r, c: Array.from(text.slice(0, units)).length };
+}
+document.addEventListener("mouseup", e => {
+  if (S.prompt || S.panel || e.target.closest && e.target.closest("#bar, #panel, #help")) return;
+  const sel = getSelection();
+  if (!sel || sel.isCollapsed || !sel.anchorNode) {                               // a plain click
+    const p = caretAt(e.clientX, e.clientY); if (p) setCursor(p.r, p.c);
+    return;
+  }
+  const a = domPos(sel.anchorNode, sel.anchorOffset), f = domPos(sel.focusNode, sel.focusOffset); if (!a || !f) return;
+  sel.removeAllRanges();
+  const fwd = a.r < f.r || (a.r === f.r && a.c <= f.c);
+  let ar = a.r, ac = a.c, hr = f.r, hc = f.c;
+  if (fwd) { if (hc === 0 && hr > ar) { hr--; hc = Math.max(0, lcp(hr).length - 1); } else hc = Math.max(0, hc - 1); }
+  else { ac = Math.max(0, ac - 1); }
+  S.vis = { mode: "v", ar, ac: Math.min(ac, Math.max(0, lcp(ar).length - 1)) };
+  S.op = null; S.pend = null; setMode();
+  setCursor(hr, Math.min(hc, Math.max(0, lcp(hr).length - 1)));
+});
+
 /* ---------- toggles / misc ---------- */
-function toggleNumbers() { S.numbers = !S.numbers; view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth()); render(); flash("line numbers " + (S.numbers ? "on" : "off")); }
-function toggleWrap() { S.wrap = !S.wrap; render(); flash(S.wrap ? "wrap lines" : "chop long lines"); }
+function toggleNumbers() { S.numbers = !S.numbers; S.off = 0; view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth()); render(); flash("line numbers " + (S.numbers ? "on" : "off")); }
+function toggleWrap() { S.wrap = !S.wrap; S.hx = 0; render(); flash(S.wrap ? "wrap lines" : "chop long lines"); }
 function toggleTheme(v) { const light = v === undefined ? !document.documentElement.classList.contains("light") : v === "light"; document.documentElement.classList.toggle("light", light); render(); }
-function setFont(family, size) { const r = document.documentElement.style; if (family) r.setProperty("--font", family); if (size) r.setProperty("--size", size + "px"); render(); }
+function setFont(family, size) { S.off = 0; const r = document.documentElement.style; if (family) r.setProperty("--font", family); if (size) r.setProperty("--size", size + "px"); render(); }
 function quit() { post({ type: "quit" }); closedSent = true; try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winless closed. You can close this window.</div>'; } }, 300); }
-const HELP = `<h3>winless &mdash; keys (like less)</h3><table>
-<tr><td><b>j</b> &darr; Enter e</td><td>line down</td></tr><tr><td><b>k</b> &uarr; y</td><td>line up</td></tr>
-<tr><td><b>Space</b> f PgDn</td><td>page down</td></tr><tr><td><b>b</b> PgUp</td><td>page up</td></tr>
-<tr><td><b>d</b> / <b>u</b></td><td>half page down / up</td></tr><tr><td><b>g</b> Home / <b>G</b> End</td><td>top / bottom</td></tr>
-<tr><td><b>/</b>pat / <b>?</b>pat</td><td>search forward / backward (smart-case regex)</td></tr><tr><td><b>n</b> / <b>N</b></td><td>next / previous match</td></tr>
-<tr><td><b>:</b>123 <b>:</b>50%</td><td>go to line / percent</td></tr><tr><td><b>-N</b> or <b>#</b></td><td>toggle line numbers</td></tr>
-<tr><td><b>-S</b> or <b>w</b></td><td>toggle wrap / chop</td></tr><tr><td><b>t</b></td><td>toggle dark / light</td></tr>
-<tr><td><b>+</b> / <b>&minus;</b> (ctrl)</td><td>font bigger / smaller</td></tr><tr><td><b>h</b></td><td>this help</td></tr><tr><td><b>q</b></td><td>quit</td></tr></table>
+const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table>
+<tr><td><b>h j k l</b> &larr;&darr;&uarr;&rarr;</td><td>move the cursor (j and k by screen row); the cursor is always shown as a block</td></tr>
+<tr><td><b>w b e</b> / <b>0 $</b> / <b>( )</b> / <b>{ }</b> / <b>gg G</b></td><td>word / line / sentence / paragraph (a line) / file motions</td></tr>
+<tr><td><b>Space</b> PgDn / PgUp</td><td>page down / up (the cursor follows); <b>Ctrl-f Ctrl-b</b> page, <b>Ctrl-d Ctrl-u</b> half page, <b>Ctrl-e Ctrl-y</b> line</td></tr>
+<tr><td><b>/</b>pat <b>?</b>pat <b>n</b> <b>N</b></td><td>search (smart-case regex); n and N wrap around; the cursor lands on the match</td></tr>
+<tr><td><b>:</b>123 <b>:</b>50%</td><td>go to line / percent</td></tr>
+<tr><td><b>-N</b> or <b>#</b> / <b>-S</b></td><td>toggle line numbers / wrap and chop; <b>zh zl z0</b> scroll sideways when chopped</td></tr>
+<tr><td><b>t</b> / ctrl +&minus;</td><td>dark / light; font size</td></tr>
+<tr><td><b>F1</b> or <b>:</b>help &nbsp; <b>q</b></td><td>this help; quit (refuses with unsaved changes)</td></tr></table>
+<h3>selecting and editing</h3><table>
+<tr><td><b>v</b> / <b>V</b> / drag</td><td>start a character / line selection at the cursor; the mouse works too; a click puts the cursor</td></tr>
+<tr><td>in visual mode</td><td>every motion above extends the selection; <b>o</b> swaps its ends; <b>Esc</b> leaves; <b>gv</b> reselects</td></tr>
+<tr><td><b>y</b> <b>d</b> <b>c</b> <b>p</b></td><td>yank, delete, change (opens the bottom panel; Ctrl-Enter applies, Esc cancels), replace with the register</td></tr>
+<tr><td><b>d c y</b> + motion or object</td><td><b>dw cw y$ dd cc yy</b>, and <b>iw aw is as ip</b> objects: <b>ciw cis dip</b>; also <b>x D C Y</b></td></tr>
+<tr><td><b>i a I A o O</b></td><td>type new text in the bottom panel (before / after the cursor, at the start / end of the line, on a new line below / above); Ctrl-Enter inserts, Esc cancels</td></tr>
+<tr><td><b>r</b>x &nbsp; <b>J</b> &nbsp; <b>x</b></td><td>replace the character; join with the next line; delete the character</td></tr>
+<tr><td><b>3j 2w 3x 2dd d2w 5G</b></td><td>counts work as in vim</td></tr>
+<tr><td><b>p</b> / <b>u</b> / <b>Ctrl-r</b></td><td>paste after the cursor / undo (half page up when there is nothing to undo) / redo</td></tr>
+<tr><td><b>:s/a/b/g</b> <b>:%s/a/b/</b> <b>:2,5s/a/b/</b></td><td>substitute (JavaScript regex; &amp; and \\1 in the replacement); ranges % . $ N,M; from visual mode <b>:</b> offers '&lt;,'&gt;, and '&lt;&gt; means exactly the selection</td></tr>
+<tr><td><b>:w</b> <b>:w!</b> <b>:q</b> <b>:q!</b> <b>:wq</b></td><td>write the file (the bar shows [+] while there are unsaved changes)</td></tr></table>
 <p>Press any key to close this help.</p>`;
 function toggleHelp(on) { const h = $("help"); h.innerHTML = HELP; h.style.display = on ? "block" : "none"; }
 
@@ -202,48 +789,66 @@ let pendingDash = false;
 function handleKey(k, e) {
   if ($("help").style.display === "block") { toggleHelp(false); return true; }
   if (pendingDash) { pendingDash = false; if (k === "N") { toggleNumbers(); return true; } if (k === "S") { toggleWrap(); return true; } }
+  if (S.panel) { if (k === "Escape") closePanel(); return true; }
+  if (S.vis) return visKey(k);
+  if (normKey(k)) return true;
   switch (k) {
-    case "j": case "ArrowDown": case "Enter": case "e": lineDown(); break;
-    case "k": case "ArrowUp": case "y": lineUp(); break;
-    case " ": case "f": case "PageDown": pageDown(); break;
-    case "b": case "PageUp": pageUp(); break;
-    case "d": pageDown(0.5); break; case "u": pageUp(0.5); break;
-    case "g": case "Home": gotoTop(); break; case "G": case "End": gotoBottom(); break;
+    case " ": case "PageDown": pageDown(); break;
+    case "PageUp": pageUp(); break;
     case "/": openPrompt("/"); break; case "?": openPrompt("?"); break; case ":": openPrompt(":"); break;
     case "n": stepMatch(S.searchBack ? -1 : 1); break; case "N": stepMatch(S.searchBack ? 1 : -1); break;
-    case "-": pendingDash = true; break; case "#": toggleNumbers(); break; case "w": toggleWrap(); break;
-    case "t": toggleTheme(); break; case "h": toggleHelp(true); break; case "q": quit(); break;
-    case "Escape": doSearch(""); break;
+    case "-": pendingDash = true; break; case "#": toggleNumbers(); break;
+    case "t": toggleTheme(); break; case "F1": toggleHelp(true); break; case "q": tryQuit(false); break;
     default: return false;
   }
   return true;
 }
 document.addEventListener("keydown", e => {
-  if (S.prompt) return;
+  if (S.prompt || S.panel) return;
   if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { setFont(null, parseInt(getComputedStyle(document.documentElement).getPropertyValue("--size")) + 1); e.preventDefault(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key === "-") { setFont(null, parseInt(getComputedStyle(document.documentElement).getPropertyValue("--size")) - 1); e.preventDefault(); return; }
+  if (e.ctrlKey && !e.metaKey && !e.altKey && $("help").style.display !== "block") {   // vim scroll chords
+    const c = { d: () => pageDown(0.5), u: () => pageUp(0.5), f: () => pageDown(), b: () => pageUp(), e: () => lineDown(), y: () => lineUp(), r: () => redoEdit() }[e.key];
+    if (c) { c(); e.preventDefault(); return; }
+  }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (handleKey(e.key, e)) e.preventDefault();
 });
-document.addEventListener("wheel", e => { if (S.prompt) return; const n = Math.sign(e.deltaY) * 3; if (n > 0) lineDown(n); else lineUp(-n); e.preventDefault(); }, { passive: false });
+document.addEventListener("wheel", e => { if (S.prompt || S.panel) return; const n = Math.sign(e.deltaY) * 3; if (n > 0) lineDown(n); else lineUp(-n); e.preventDefault(); }, { passive: false });
 window.addEventListener("resize", () => render());
 
 /* ---------- server link ---------- */
-function post(obj) { try { return fetch("/event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj), keepalive: true }); } catch (e) {} }
+window.addEventListener("error", e => { S.err = e.message + " @" + e.lineno + ":" + e.colno; try { scheduleState(); } catch (x) {} });
+function post(obj) { try { return fetch("/event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) }); } catch (e) {} }
 function scheduleState() { clearTimeout(sentTimer); sentTimer = setTimeout(sendState, 120); }
+function geom() {                   // where things actually are on screen (for diagnosing layout)
+  const r = id => { const b = $(id).getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+  const c = view.querySelector(".vcur"), cb = c ? c.getBoundingClientRect() : null;
+  return { inner: [innerWidth, innerHeight], view: r("view"), bar: r("bar"), panel: r("panel"), panelDisplay: getComputedStyle($("panel")).display,
+           cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null };
+}
 function sendState() {
-  post({ type: "state", name: S.name, top: S.top + 1, bottom: S.bottom + 1, total: total(), atEnd: S.atEnd,
+  post({ type: "state", name: S.name, err: S.err || null, dirty: S.dirty, undo: S.undo, panel: !!S.panel, geom: geom(), vis: S.vis ? { mode: S.vis.mode, ar: S.vis.ar, ac: S.vis.ac } : null, cur: S.cur, op: S.op, off: Math.round(S.off), top: S.top + 1, bottom: S.bottom + 1, total: total(), atEnd: S.atEnd,
          search: S.search ? S.search.src : null, matchLines: S.matchLines.length, curLine: S.curLine + 1,
          numbers: S.numbers, wrap: S.wrap, theme: document.documentElement.classList.contains("light") ? "light" : "dark",
          width: view.clientWidth, height: view.clientHeight,
-         visible: Array.from(view.children).map(c => c.textContent.replace(/^\d+/, "")).slice(0, 80) });
+         visible: Array.from(view.children).map(c => c.textContent.replace(/^\d+/, "").slice(0, 2000)).slice(0, 80) });
 }
-async function loadContent() {
+async function loadContent(keep = false) {
   const r = await fetch("/content", { cache: "no-store" }); const j = await r.json();
-  S.name = j.name || ""; S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+  S.name = j.name || ""; S.path = j.path || null; S.dirty = !!j.dirty; S.undo = j.undo || 0; S.nl = /\n$/.test(j.text || "\n");
+  S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n"); cpCache.clear();
   if (j.settings) applySettings(j.settings);
   view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());
-  S.top = j.top ? j.top - 1 : 0; S.search = null; S.matchLines = []; S.curLine = -1; S.marks = j.marks || []; S.hls = (j.hls || []).map(h => ({ re: makeRe(h.pattern), color: h.color }));
+  S.vis = null; setMode();
+  if (keep) {                        // the text was edited: keep the place, drop the selection
+    S.top = clamp(S.top, 0, Math.max(0, total() - 1)); S.off = 0;
+    S.cur = { r: clamp(S.cur.r, 0, Math.max(0, total() - 1)), c: S.cur.c }; S.cur.c = clamp(S.cur.c, 0, Math.max(0, lcp(S.cur.r).length - 1));
+    if (S.search) doSearch(S.search.src, S.searchBack, true); else render();
+    return;
+  }
+  S.last = null;
+  S.top = j.top ? j.top - 1 : 0; S.off = 0; S.cur = { r: S.top, c: 0 }; S.goalX = null; S.op = null; S.pend = null; setMode(); S.search = null; S.matchLines = []; S.curLine = -1; S.marks = j.marks || []; S.hls = (j.hls || []).map(h => ({ re: makeRe(h.pattern), color: h.color }));
   document.title = (S.name || "winless") + " - winless"; render();
   if (j.search) doSearch(j.search, false, true);
 }
@@ -255,8 +860,9 @@ function applySettings(s) {
 function onCommand(c) {
   switch (c.cmd) {
     case "load": loadContent(); break;
+    case "reload": loadContent(true); break;
     case "goto": c.line ? gotoLine(c.line) : c.percent !== undefined ? gotoPercent(c.percent) : c.where === "bottom" ? gotoBottom() : gotoTop(); break;
-    case "scroll": if (c.page) { c.n >= 0 ? pageDown(Math.abs(c.n) || 1) : pageUp(Math.abs(c.n)); } else if (c.n >= 0) { S.top = clamp(S.top + c.n, 0, Math.max(0, total() - 1)); render(); } else lineUp(-c.n); break;
+    case "scroll": if (c.page) { c.n >= 0 ? pageDown(Math.abs(c.n) || 1) : pageUp(Math.abs(c.n)); } else if (c.n >= 0) lineDown(c.n); else lineUp(-c.n); break;
     case "search": doSearch(c.pattern, !!c.backward); break;
     case "next": stepMatch(S.searchBack ? -1 : 1); break; case "prev": stepMatch(S.searchBack ? 1 : -1); break;
     case "clear": doSearch(""); break;
@@ -268,16 +874,20 @@ function onCommand(c) {
     case "config": applySettings(c); render(); break;
     case "flash": flash(c.text); break;
     case "close": window.close(); break;
-    case "sendstate": sendState(); break;
+    case "sendstate": break;
+    case "ex": runPrompt(":", c.text || ""); break;
+    case "type": if (S.panel) { const f = S.panel.onCommit, t = c.text || ""; $("ptxt").value = t; if (c.commit) { closePanel(); f(t); } } else flash("no panel is open"); break;
   }
+  sendState();                       // report at once: timers are throttled in a window that is not in front
 }
 function connect() {
   const es = new EventSource("/events");
-  es.onmessage = ev => { try { onCommand(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  es.onmessage = ev => { try { onCommand(JSON.parse(ev.data)); } catch (e) { S.err = ((e && e.stack) || String(e)).slice(0, 500); console.error(e); try { sendState(); } catch (x) {} } };
   es.onopen = () => { post({ type: "hello" }); loadContent(); };
   es.onerror = () => { /* the browser reconnects by itself */ };
 }
-window.addEventListener("beforeunload", () => { if (!closedSent) navigator.sendBeacon("/event", JSON.stringify({ type: "closed" })); });
+window.addEventListener("beforeunload", e => { if (S.dirty && !closedSent) { e.preventDefault(); e.returnValue = "You have unsaved changes."; return e.returnValue; } });   // closing the window with unsaved edits asks first
+window.addEventListener("pagehide", () => { if (!closedSent) navigator.sendBeacon("/event", JSON.stringify({ type: "closed" })); });
 connect();
 </script>
 </body>

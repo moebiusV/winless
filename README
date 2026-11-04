@@ -5,7 +5,7 @@ winless shows a text file in a chromeless browser window (full screen by default
 script or another program drive it: jump to a line, search and highlight, shade line ranges, send keys, and read back
 where the person is reading. Under WSL the window opens on the Windows desktop.
 
-    winless open notes.txt            # opens a full-screen window; q quits, h shows the keys
+    winless open notes.txt            # opens a full-screen window; q quits, F1 shows the keys
     winless goto 120                  # drive it from the shell (or from another program)
     winless search 'ayin|aleph'       # smart-case regex; n / N step through matches
     winless mark 10-20 yellow         # shade lines
@@ -23,3 +23,13 @@ Environment: WINLESS_PORT, WINLESS_BROWSER (path to a browser .exe), WINLESS_HTM
 WINLESS_PROFILE (Windows path of the window's browser profile; default %LOCALAPPDATA%\\winless\\profile).
 
 See winless(1), INSTALL, NEWS. License: GPL-3.0-or-later (COPYING).
+
+Editing: with a real file open, v / V (or dragging) select text; y d c p act on it, u undoes, :w writes (atomically, and not
+if the file changed on disk meanwhile).  winless edit, winless undo and winless write do the same from the shell.
+
+Windows: every `winless open FILE` starts its own server on a free port and opens its own window, so opening never disturbs another
+window; `winless windows` lists them, a file already open is not opened twice (--new forces it), and with several windows open
+commands ask which one (or use --port N).
+
+Reverting: every write keeps the file it replaces, so `winless history` lists the earlier versions and `winless revert [N]` puts one
+back (a revert can itself be reverted).  Unsaved edits are never kept: quitting the window discards them, as quitting vim does.

@@ -61,10 +61,85 @@ Block until q is pressed or the window is closed.
 .TP
 .BR window ", " close ", " start ", " stop ", " serve
 Open the window; close it; start the server in the background; stop it; run it in the foreground.
+.TP
+.B edit R1 C1 R2 C2 TEXT|\-
+Replace the range from row R1, column C1 up to (not including) row R2, column C2 with TEXT, or with standard input
+for \-. Rows count from 1; columns count Unicode code points from 1; column (length + 1) is the end of a row. The change
+is made in the server's copy of the text (undoable, shown with [+]); the file is not touched until
+.BR write .
+.TP
+.B undo
+Undo the last edit.
+.TP
+.B history
+List the earlier versions of the file that writes have kept, oldest first.
+.TP
+.B revert [N] [\-\-force]
+Put back version N of the file (default: the latest kept) and write it. A revert is a write, so it keeps what it replaces and can
+itself be reverted. Refused while there are unsaved edits, unless \-\-force.
+.TP
+.B redo
+Redo the last undone edit.
+.TP
+.B ex COMMAND
+Run an ex command in the window as if typed after a colon: s/a/b/g, %s/a/b/, 2,5s/a/b/, w, 42 ...
+.TP
+.B type [\-\-commit] TEXT
+Fill the bottom panel (opened by c, i, a, o ...) with TEXT, and with \-\-commit apply it.
+.TP
+.B write [\-f]
+Write the text to the file it was opened from, atomically (a temporary file in the same directory, then a rename).
+It refuses when the file has changed on disk since it was opened; \-f overwrites anyway.
+.SH REVERTING
+Every write keeps what it is about to replace, in ~/.local/share/winless/history/ (one directory per file, one numbered snapshot per
+write). A write whose old content is identical to the new writes nothing extra, and if the old content cannot be kept the write is
+refused. So any change that reached a file can be undone with
+.B winless revert
+(or :revert [N] in the window; :history lists the versions), even after the window is gone, even if the write overwrote someone
+else's change with :w!. Nothing is pruned. Edits that were never written live only in the window and are discarded when it quits.
+.SH WINDOWS
+Each
+.B open
+starts its own server, on a port chosen at that moment, and opens a window for it, so the server serves just that one window and
+opening a window never disturbs the others. A file that is already open is not opened twice: winless says which port has it
+(\-\-new opens another anyway). \-\-here replaces the text of the one existing window instead (refused while it has unsaved edits,
+unless \-\-force). The servers record their ports in ~/.cache/winless/ports; a server on the default port 8777 is found as well.
+.B winless windows
+lists them with the file, whether a window is connected, and [unsaved] when there are edits not yet written.
+.PP
+When more than one window is open, a command that acts on one (goto, key, status, edit, write ...) does not guess: on a terminal
+it shows the list and asks which; otherwise it prints the list and exits with status 2. \-\-port N (or $WINLESS_PORT) picks one.
+With a single window no question is asked. A server started for a window ends with that window, as quitting vim does: when the
+window quits (:q!, :wq or q) it ends at once, and a minute after the window is simply closed. Edits that were not written are
+discarded then; closing a window that has unsaved edits asks first, and :q refuses until you write with :w (or :wq, which writes
+and quits) or discard with :q!.
+.B stop \-\-all
+stops every server, and (like
+.B stop
+and
+.BR "open \-\-here" )
+refuses one that has unsaved edits unless \-\-force.
 .SH KEYS
 j, Down, Enter, e: line down; k, Up, y: line up; Space, f, PageDown: page down; b, PageUp: page up; d, u: half page;
-g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match;
-:NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; t: theme; Ctrl-plus/minus: font size; h: help; q: quit.
+g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match, wrapping around at the ends of the file (like vim's wrapscan); h, Left / l, Right: scroll sideways when long lines are chopped (w toggles), 0: back to column 0; Ctrl-d, Ctrl-u: half page; Ctrl-f, Ctrl-b: page; Ctrl-e, Ctrl-y: line; gg: top;
+:NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; t: theme; Ctrl-plus/minus: font size; F1 or :help: help; q: quit.
+.SH CURSOR, VISUAL MODE AND EDITING
+The window has a cursor, always shown as a steady block. The keys are vim's: h, j, k, l and the arrow keys move it (j and k by screen
+row, so a wrapped paragraph is walked row by row), w, b, e, 0, $, ( ), { }, G and gg move it further, and a mouse click puts it
+there. The page scrolls to keep it in view, and Space, PageUp, PageDown, Ctrl-f, Ctrl-b, Ctrl-d, Ctrl-u, Ctrl-e and Ctrl-y scroll
+(the cursor follows). A search puts the cursor on the match.
+.PP
+v starts a character selection at the cursor, V a line selection, and dragging with the mouse a character selection. Every motion
+extends it; o swaps its ends; Esc leaves; gv reselects. y yanks, d deletes, c opens a text panel at the bottom with the selection
+(Ctrl-Enter applies, Esc cancels), and p replaces the selection with the register. In normal mode d, c and y take a motion or a text
+object: dw, cw, d$, dd, cc, yy, ciw, cis, dip, and x, D, C, Y work too. p pastes after the cursor, and u undoes the last edit (when
+there is nothing to undo, u is half a page up; Ctrl-r redoes). i, a, I, A, o and O open the same panel to type new text (Ctrl-Enter
+inserts it before or after the cursor, at the start or end of the line, or on a new line below or above). r replaces characters, J joins
+lines, and counts work as in vim (3j, 2w, 3x, 2dd, d2w, 5G). :s/pattern/replacement/[gi] substitutes, with the ranges %, ., $, N,M and
+\(aq<,\(aq> (the selected lines); \(aq<> means exactly the selected text. The pattern is a JavaScript regular expression; & and \\1 work in
+the replacement. :w, :w!, :q, :q! and :wq write and quit as in vim; q refuses while there are unsaved
+changes. Edits live in the server until written, and a write that would overwrite a file changed by someone else is refused.
+Open a file (not standard input) to edit.
 .SH ENVIRONMENT
 .TP
 .B WINLESS_PORT

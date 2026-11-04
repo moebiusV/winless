@@ -24,6 +24,8 @@ void sb_printf(sb_t *b, const char *fmt, ...) __attribute__((format(printf, 2, 3
 char *sb_detach(sb_t *b, size_t *len);
 void sb_put_utf8_clean(sb_t *b, const char *s, size_t n);  /* copy, turning invalid UTF-8 into U+FFFD */
 double now_monotonic(void);
+void winless_data_dir(char *buf, size_t n);                /* ~/.local/share/winless (or $XDG_DATA_HOME/winless), created */
+void winless_cache_dir(char *buf, size_t n);               /* ~/.cache/winless (or $XDG_CACHE_HOME/winless), created */
 char *read_file(const char *path, size_t *len);            /* NULL on error */
 
 /* ---- json.c ---- */
@@ -45,11 +47,17 @@ void json_put_string(sb_t *b, const char *s, size_t n);  /* append a quoted, esc
 void json_put_number(sb_t *b, double d);
 void json_write(sb_t *b, const jv *v);
 
+/* ---- edit.c ---- (rows from 1; columns in code points from 1; a range excludes its end) */
+size_t edit_offset(const char *text, size_t len, long row, long col);      /* byte offset, or (size_t)-1 if out of range */
+char *edit_replace(const char *text, size_t len, long r1, long c1, long r2, long c2, const char *repl, size_t rlen,
+                   size_t *outlen, char **removed, size_t *removedlen);    /* new text (caller frees), NULL if the range is invalid */
+void edit_endpos(long r1, long c1, const char *repl, size_t rlen, long *r2, long *c2);   /* where text inserted at (r1,c1) ends */
+
 /* ---- server.c ---- */
-int server_run(int port);                                /* serve until stopped */
+int server_run(int port, double idle_secs);              /* serve until stopped (or, if idle_secs > 0, until no window has been connected and no edits are unsaved for that long) */
 
 /* ---- client.c ---- */
-int client_main(int port, int argc, char **argv);        /* the CLI commands */
+int client_main(int port, int explicit_port, int argc, char **argv);   /* the CLI commands; explicit_port: --port or $WINLESS_PORT was given */
 int server_alive(int port);
 const char *viewer_html_path(void);
 

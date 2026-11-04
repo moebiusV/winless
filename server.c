@@ -6,6 +6,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "winless.h"
 #include <arpa/inet.h>
+#include <dirent.h>
+#include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -16,6 +18,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_BODY (256UL * 1024 * 1024)
@@ -43,18 +46,26 @@ static struct {
     char *search; long top;
     char *view; size_t viewlen;
     long seq; char *last_event;
+    char *path; long long mtime; long saved_depth;     /* the file being edited, its mtime when read, undo depth at the last write */
 } H;
+
+static int is_dirty(void);
+static size_t nundo_get(void);
+static long long file_mtime_ns(const char *path);
+static void undo_clear(void);
 
 static conn **conns;
 static size_t nconns, capconns;
 static volatile sig_atomic_t g_stop;
 
 static void on_term(int sig) { (void)sig; g_stop = 1; }
+static double g_idle_secs;          /* > 0 for a server made for one window: it ends with that window */
+static double g_quit_at;            /* when the window said quit (:q!, :wq, q), the time the server ends */
 
 /* ------------------------------------------------------------------------------------------------------- hub */
 static void hub_init(void) {
     memset(&H, 0, sizeof H);
-    H.name = xstrdup(""); H.text = xstrdup(""); H.numbers = H.wrap = -1; H.top = 1;
+    H.name = xstrdup(""); H.text = xstrdup(""); H.numbers = H.wrap = -1; H.top = 1; H.mtime = -1;
 }
 
 static void set_str(char **dst, const jv *v) {
@@ -172,7 +183,8 @@ static void h_content(conn *c) {
     sb_t b; sb_init(&b);
     sb_puts(&b, "{\"name\":"); json_put_string(&b, H.name, strlen(H.name));
     sb_puts(&b, ",\"text\":"); json_put_string(&b, H.text, H.textlen);
-    sb_printf(&b, ",\"version\":%ld,\"settings\":", H.version); settings_json(&b);
+    sb_printf(&b, ",\"version\":%ld,\"dirty\":%s,\"undo\":%zu,\"path\":", H.version, is_dirty() ? "true" : "false", nundo_get()); put_opt_string(&b, H.path);
+    sb_puts(&b, ",\"settings\":"); settings_json(&b);
     sb_puts(&b, ",\"marks\":[");
     for (size_t i = 0; i < H.nmarks; i++) {
         if (i) sb_putc(&b, ',');
@@ -228,21 +240,231 @@ static void h_event(conn *c, const char *body, size_t blen) {
         H.top = (long)json_getnum(v, "top", 1);
     } else if (t && (!strcmp(t, "quit") || !strcmp(t, "closed"))) {
         H.seq++; free(H.last_event); H.last_event = xstrdup(t);
+        if (!strcmp(t, "quit") && g_idle_secs > 0) g_quit_at = now_monotonic() + 2.0;       /* quitting ends the window's server; unsaved edits are discarded, as when quitting vim */
     }
     json_free(v);
     respond(c, 200, "application/json; charset=utf-8", "{\"ok\":true}", 11);
+}
+
+/* ------------------------------------------------------------------------------------------------ editing */
+typedef struct { long r1, c1, r2, c2; char *old; size_t oldlen; } undo_t;       /* the range now holding the new text, and what it replaced */
+static undo_t *undo_stack; static size_t nundo, capundo;
+static undo_t *redo_stack; static size_t nredo, capredo;      /* edits that were undone, for redo; any new edit empties it */
+
+static long long file_mtime_ns(const char *path) {
+    struct stat st;
+    if (stat(path, &st)) return -1;
+    return (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+}
+static void redo_clear(void) {
+    for (size_t i = 0; i < nredo; i++) free(redo_stack[i].old);
+    nredo = 0;
+}
+static void undo_clear(void) {
+    for (size_t i = 0; i < nundo; i++) free(undo_stack[i].old);
+    nundo = 0; H.saved_depth = 0; redo_clear();
+}
+static void stack_push(undo_t **st, size_t *n, size_t *cap, undo_t u) {
+    if (*n == *cap) { *cap = *cap ? *cap * 2 : 64; *st = xrealloc(*st, *cap * sizeof **st); }
+    (*st)[(*n)++] = u;
+}
+static int is_dirty(void) { return (long)nundo != H.saved_depth; }
+static size_t nundo_get(void) { return nundo; }
+
+static void put_result(sb_t *r, const char *err) {
+    sb_printf(r, "{\"ok\":%s", err ? "false" : "true");
+    if (err) { sb_puts(r, ",\"error\":"); json_put_string(r, err, strlen(err)); }
+    sb_printf(r, ",\"version\":%ld,\"dirty\":%s,\"undo\":%zu,\"redo\":%zu}", H.version, is_dirty() ? "true" : "false", nundo, nredo);
+}
+static void text_changed(void) {                    /* tell every page to re-read the text, keeping its place */
+    H.version++;
+    const char *m = "{\"cmd\":\"reload\"}";
+    broadcast(m, strlen(m));
+}
+
+/* Write the text to the file by way of a temporary file in the same directory, so a crash cannot leave half a file. */
+static const char *write_atomic(const char *path, const char *data, size_t len) {
+    size_t pl = strlen(path);
+    char *tmp = xmalloc(pl + 16); snprintf(tmp, pl + 16, "%s.winless.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { free(tmp); return "cannot create the temporary file next to the original"; }
+    int ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    ok = (fclose(f) == 0) && ok;
+    struct stat st;
+    if (ok && stat(path, &st) == 0) chmod(tmp, st.st_mode & 07777);
+    if (ok && rename(tmp, path) != 0) ok = 0;
+    if (!ok) unlink(tmp);
+    free(tmp);
+    return ok ? NULL : "could not write the file";
+}
+
+
+/* ------------------------------------------------------------------------------------------------ history
+ * Every write first keeps what it is about to replace, so any write can be undone later with `revert` -- and a revert is a write,
+ * so it keeps what it replaces too.  Snapshots live in ~/.local/share/winless/history/<hash>-<name>/NNNNNN.<time>.prev */
+static void history_dir(const char *path, char *buf, size_t n) {
+    unsigned long long h = 1469598103934665603ULL;                       /* FNV-1a of the full path */
+    for (const char *p = path; *p; p++) { h ^= (unsigned char)*p; h *= 1099511628211ULL; }
+    const char *base = strrchr(path, '/'); base = base ? base + 1 : path;
+    char dir[1024]; winless_data_dir(dir, sizeof dir);
+    char hd[1100]; snprintf(hd, sizeof hd, "%s/history", dir); mkdir(hd, 0755);
+    char nm[80]; size_t k = 0; for (; base[k] && k < 60; k++) nm[k] = (base[k] == '/' || base[k] == '%') ? '_' : base[k]; nm[k] = 0;
+    snprintf(buf, n, "%s/%016llx-%s", hd, h, nm); mkdir(buf, 0755);
+    char pf[1300]; snprintf(pf, sizeof pf, "%s/PATH", buf);
+    FILE *f = fopen(pf, "w"); if (f) { fprintf(f, "%s\n", path); fclose(f); }       /* which file this directory is about */
+}
+static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static size_t history_list(const char *dir, char ***names) {         /* the snapshot file names, oldest first */
+    DIR *d = opendir(dir); size_t n = 0, cap = 0; *names = NULL;
+    if (!d) return 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (l < 6 || strcmp(e->d_name + l - 5, ".prev") != 0) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 16; *names = xrealloc(*names, cap * sizeof **names); }
+        (*names)[n++] = xstrdup(e->d_name);
+    }
+    closedir(d);
+    qsort(*names, n, sizeof **names, cmp_str);
+    return n;
+}
+static void history_free(char **names, size_t n) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); }
+
+/* Keep the file's present content, unless it is what is about to be written.  NULL on success (or nothing to keep). */
+static const char *snapshot_current(const char *path, const char *newdata, size_t newlen) {
+    size_t len; char *old = read_file(path, &len);
+    if (!old) return NULL;                                           /* no file yet: nothing to lose */
+    if (len == newlen && memcmp(old, newdata, len) == 0) { free(old); return NULL; }
+    char dir[1500]; history_dir(path, dir, sizeof dir);
+    char **names; size_t n = history_list(dir, &names); long seq = 1;
+    if (n) seq = atol(names[n - 1]) + 1;
+    history_free(names, n);
+    char ts[32]; time_t now = time(NULL); struct tm tm; gmtime_r(&now, &tm); strftime(ts, sizeof ts, "%Y%m%dT%H%M%SZ", &tm);
+    char f[1700], tmp[1720]; snprintf(f, sizeof f, "%s/%06ld.%s.prev", dir, seq, ts); snprintf(tmp, sizeof tmp, "%s.tmp", f);
+    FILE *fp = fopen(tmp, "wb");
+    int ok = fp && fwrite(old, 1, len, fp) == len && fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+    if (fp) ok = (fclose(fp) == 0) && ok;
+    if (ok) ok = rename(tmp, f) == 0;
+    if (!ok) unlink(tmp);
+    free(old);
+    return ok ? NULL : "cannot keep a copy of the old file (so it was not written)";
+}
+static void history_json(sb_t *r) {
+    if (!H.path) { put_result(r, "no file: the text was not opened from a file"); return; }
+    char dir[1500]; history_dir(H.path, dir, sizeof dir);
+    char **names; size_t n = history_list(dir, &names);
+    sb_puts(r, "{\"ok\":true,\"path\":"); json_put_string(r, H.path, strlen(H.path)); sb_puts(r, ",\"items\":[");
+    for (size_t i = 0; i < n; i++) {
+        char f[1700]; snprintf(f, sizeof f, "%s/%s", dir, names[i]); struct stat st; long long sz = stat(f, &st) == 0 ? (long long)st.st_size : -1;
+        const char *dot = strchr(names[i], '.'); char ts[32] = ""; if (dot) { snprintf(ts, sizeof ts, "%.16s", dot + 1); }
+        if (i) sb_putc(r, ',');
+        sb_printf(r, "{\"n\":%ld,\"time\":", atol(names[i])); json_put_string(r, ts, strlen(ts)); sb_printf(r, ",\"bytes\":%lld}", sz);
+    }
+    sb_puts(r, "]}");
+    history_free(names, n);
+}
+static const char *history_read(const char *path, long which, char **data, size_t *len) {   /* which = 0: the latest */
+    char dir[1500]; history_dir(path, dir, sizeof dir);
+    char **names; size_t n = history_list(dir, &names);
+    const char *err = NULL; const char *pick = NULL;
+    if (!n) err = "no earlier version of this file has been kept yet";
+    else if (which == 0) pick = names[n - 1];
+    else { for (size_t i = 0; i < n; i++) if (atol(names[i]) == which) pick = names[i]; if (!pick) err = "no such version (see the history)"; }
+    if (pick) { char f[1700]; snprintf(f, sizeof f, "%s/%s", dir, pick); *data = read_file(f, len); if (!*data) err = "cannot read that version"; }
+    history_free(names, n);
+    return err;
+}
+
+static const char *do_write(int force) {
+    if (!H.path) return "no file: the text was not opened from a file";
+    if (!force && H.mtime != -1 && file_mtime_ns(H.path) != H.mtime) return "the file changed on disk since it was opened (use :w! to overwrite)";
+    const char *err = snapshot_current(H.path, H.text, H.textlen);        /* keep what is there now, so the write can be reverted */
+    if (err) return err;
+    err = write_atomic(H.path, H.text, H.textlen);
+    if (!err) { H.mtime = file_mtime_ns(H.path); H.saved_depth = (long)nundo; const char *m = "{\"cmd\":\"reload\"}"; broadcast(m, strlen(m)); }   /* pages drop their [+] */
+    return err;
+}
+
+static void edit_command(const char *cmd, const jv *v, sb_t *r) {
+    if (!strcmp(cmd, "edit")) {
+        size_t tl = 0; const char *tx = json_gets(v, "text", &tl);
+        long r1 = (long)json_getnum(v, "r1", 0), c1 = (long)json_getnum(v, "c1", 0), r2 = (long)json_getnum(v, "r2", 0), c2 = (long)json_getnum(v, "c2", 0);
+        size_t nl, rl; char *removed;
+        char *nt = tx ? edit_replace(H.text, H.textlen, r1, c1, r2, c2, tx, tl, &nl, &removed, &rl) : NULL;
+        if (!nt) { put_result(r, tx ? "range out of bounds" : "no text given"); return; }
+        long er, ec; edit_endpos(r1, c1, tx, tl, &er, &ec);
+        stack_push(&undo_stack, &nundo, &capundo, (undo_t){ r1, c1, er, ec, removed, rl });
+        redo_clear();
+        free(H.text); H.text = nt; H.textlen = nl;
+        text_changed(); put_result(r, NULL);
+    } else if (!strcmp(cmd, "undo")) {
+        if (!nundo) { put_result(r, "nothing to undo"); return; }
+        undo_t u = undo_stack[nundo - 1];
+        size_t nl, newlen; char *newtxt;
+        char *nt = edit_replace(H.text, H.textlen, u.r1, u.c1, u.r2, u.c2, u.old, u.oldlen, &nl, &newtxt, &newlen);
+        if (!nt) { put_result(r, "undo failed: the text no longer matches"); return; }
+        long er, ec; edit_endpos(u.r1, u.c1, u.old, u.oldlen, &er, &ec);          /* where the restored text ends */
+        stack_push(&redo_stack, &nredo, &capredo, (undo_t){ u.r1, u.c1, er, ec, newtxt, newlen });
+        free(u.old); nundo--;
+        free(H.text); H.text = nt; H.textlen = nl;
+        text_changed(); put_result(r, NULL);
+    } else if (!strcmp(cmd, "redo")) {
+        if (!nredo) { put_result(r, "nothing to redo"); return; }
+        undo_t e = redo_stack[nredo - 1];
+        size_t nl, rl; char *restored;
+        char *nt = edit_replace(H.text, H.textlen, e.r1, e.c1, e.r2, e.c2, e.old, e.oldlen, &nl, &restored, &rl);
+        if (!nt) { put_result(r, "redo failed: the text no longer matches"); return; }
+        long er, ec; edit_endpos(e.r1, e.c1, e.old, e.oldlen, &er, &ec);
+        stack_push(&undo_stack, &nundo, &capundo, (undo_t){ e.r1, e.c1, er, ec, restored, rl });
+        free(e.old); nredo--;
+        free(H.text); H.text = nt; H.textlen = nl;
+        text_changed(); put_result(r, NULL);
+    } else if (!strcmp(cmd, "history")) {
+        history_json(r);
+    } else if (!strcmp(cmd, "revert")) {
+        int force = json_getbool(v, "force", 0);
+        if (!H.path) { put_result(r, "no file: the text was not opened from a file"); return; }
+        if (is_dirty() && !force) { put_result(r, "there are unsaved edits: write them (:w) or discard them (add force) before reverting"); return; }
+        char *data = NULL; size_t dl = 0; const char *err = history_read(H.path, (long)json_getnum(v, "n", 0), &data, &dl);
+        if (err) { put_result(r, err); return; }
+        long er, ec; edit_endpos(1, 1, H.text, H.textlen, &er, &ec);        /* the whole text, replaced as one undoable edit */
+        size_t nl, rl; char *removed;
+        char *nt = edit_replace(H.text, H.textlen, 1, 1, er, ec, data, dl, &nl, &removed, &rl);
+        if (!nt) { free(data); put_result(r, "could not apply that version"); return; }
+        long ner, nec; edit_endpos(1, 1, data, dl, &ner, &nec);
+        stack_push(&undo_stack, &nundo, &capundo, (undo_t){ 1, 1, ner, nec, removed, rl }); redo_clear();
+        free(H.text); H.text = nt; H.textlen = nl; free(data);
+        text_changed();
+        put_result(r, do_write(force));                                      /* a write: it keeps the content it replaces, so this can be reverted too */
+    } else {                                         /* write */
+        put_result(r, do_write(json_getbool(v, "force", 0)));
+    }
 }
 
 static void h_cmd(conn *c, const char *body, size_t blen) {
     jv *v = json_parse(body, blen);
     const char *cmd = v ? json_gets(v, "cmd", NULL) : NULL;
     if (!cmd) { json_free(v); respond_err(c, 400, "bad command"); return; }
+    if ((!strcmp(cmd, "load") || !strcmp(cmd, "stop")) && H.path && is_dirty() && !json_getbool(v, "force", 0)) {
+        /* the text has edits that are not in the file: loading something else or stopping would throw them away */
+        sb_t res; sb_init(&res);
+        sb_puts(&res, "{\"ok\":false,\"error\":");
+        sb_t msg; sb_init(&msg);
+        sb_printf(&msg, "unsaved changes in %s (write them with :w or `winless write`, or add --force to discard them)", H.name);
+        json_put_string(&res, msg.s, msg.len); sb_free(&msg);
+        sb_putc(&res, '}'); json_free(v); respond_json(c, &res); return;
+    }
+    if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "history") || !strcmp(cmd, "revert")) {
+        sb_t res; sb_init(&res); edit_command(cmd, v, &res); json_free(v); respond_json(c, &res); return;
+    }
     int stop = 0, bcast = 1;
     if (!strcmp(cmd, "load")) {
         size_t tl = 0; const char *nm = json_gets(v, "name", NULL), *tx = json_gets(v, "text", &tl);
         free(H.name); H.name = xstrdup(nm ? nm : "");
         free(H.text); H.text = xstrndup(tx ? tx : "", tl); H.textlen = tl;
         H.version++; clear_marks(); clear_hls();
+        { const char *pth = json_gets(v, "path", NULL); free(H.path); H.path = pth ? xstrdup(pth) : NULL;
+          H.mtime = H.path ? file_mtime_ns(H.path) : -1; undo_clear(); }
         free(H.search); H.search = NULL; set_str(&H.search, json_get(v, "search"));
         H.top = (long)json_getnum(v, "line", 1); if (H.top < 1) H.top = 1;
         apply_settings(json_get(v, "settings"));
@@ -326,7 +548,19 @@ static int make_listener(int port) {
     return s;
 }
 
-int server_run(int port) {
+/* Every server records its port in ~/.cache/winless/ports/PORT (its pid inside), so `winless windows` can find them all. */
+static void registry_file(int port, char *buf, size_t n) {
+    char dir[1024]; winless_cache_dir(dir, sizeof dir);
+    char pd[1100]; snprintf(pd, sizeof pd, "%s/ports", dir); mkdir(pd, 0755);
+    snprintf(buf, n, "%s/%d", pd, port);
+}
+static void registry_add(int port) {
+    char f[1200]; registry_file(port, f, sizeof f);
+    FILE *fp = fopen(f, "w"); if (fp) { fprintf(fp, "%ld\n", (long)getpid()); fclose(fp); }
+}
+static void registry_remove(int port) { char f[1200]; registry_file(port, f, sizeof f); unlink(f); }
+
+int server_run(int port, double idle_secs) {
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_term; sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
@@ -334,6 +568,9 @@ int server_run(int port) {
     int ls = make_listener(port);
     if (ls < 0) { fprintf(stderr, "winless: cannot listen on 127.0.0.1:%d: %s\n", port, strerror(errno)); return 1; }
     printf("winless %s serving on http://127.0.0.1:%d/\n", PACKAGE_VERSION, port); fflush(stdout);
+    registry_add(port);
+    g_idle_secs = idle_secs;
+    double last_busy = now_monotonic();                             /* for idle_secs: the last time a window was connected or edits were unsaved */
 
     while (!g_stop) {
         struct pollfd *pf = xmalloc((nconns + 1) * sizeof *pf);
@@ -365,6 +602,9 @@ int server_run(int port) {
         }
         free(pf);
         double now = now_monotonic();
+        if (sse_count() > 0) last_busy = now;
+        else if (idle_secs > 0 && now - last_busy > idle_secs) g_stop = 1;       /* its window is gone: unsaved edits go with it */
+        if (g_quit_at > 0 && now >= g_quit_at) g_stop = 1;
         for (size_t i = 0; i < nconns; i++) {
             conn *c = conns[i];
             if (c->fd < 0) continue;
@@ -377,5 +617,6 @@ int server_run(int port) {
     for (size_t i = 0; i < nconns; i++) conn_close(conns[i]);
     compact();
     close(ls);
+    registry_remove(port);
     return 0;
 }

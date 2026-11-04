@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -66,6 +67,22 @@ void sb_put_utf8_clean(sb_t *b, const char *s, size_t n) {
 double now_monotonic(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+void winless_data_dir(char *buf, size_t n) {
+    const char *home = getenv("HOME"), *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) snprintf(buf, n, "%s/winless", xdg); else snprintf(buf, n, "%s/.local/share/winless", home ? home : "/tmp");
+    char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", buf);
+    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
+    mkdir(buf, 0755);
+}
+
+void winless_cache_dir(char *buf, size_t n) {
+    const char *home = getenv("HOME"), *xdg = getenv("XDG_CACHE_HOME");
+    if (xdg && *xdg) snprintf(buf, n, "%s/winless", xdg); else snprintf(buf, n, "%s/.cache/winless", home ? home : "/tmp");
+    char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", buf);
+    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
+    mkdir(buf, 0755);
 }
 
 char *read_file(const char *path, size_t *len) {

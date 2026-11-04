@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <dirent.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,18 +90,18 @@ static int spawn_detached(char *const argv[], int use_path, const char *logfile)
     return 1;
 }
 
-static void ensure_server(int port) {
+static void ensure_server(int port, double idle_secs) {
     if (server_alive(port)) return;
-    const char *home = getenv("HOME"), *xdg = getenv("XDG_CACHE_HOME");
     char dir[1024], log[1100];
-    if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/winless", xdg); else snprintf(dir, sizeof dir, "%s/.cache/winless", home ? home : "/tmp");
-    char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", dir);
-    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
-    mkdir(dir, 0755);
+    winless_cache_dir(dir, sizeof dir);
     snprintf(log, sizeof log, "%s/server.log", dir);
     char pbuf[16]; snprintf(pbuf, sizeof pbuf, "%d", port);
+    char ibuf[16]; snprintf(ibuf, sizeof ibuf, "%d", (int)idle_secs);
     char *me = self_path();
-    char *argv[] = { me, "--port", pbuf, "serve", NULL };
+    char *argv[8]; int n = 0;
+    argv[n++] = me; argv[n++] = "--port"; argv[n++] = pbuf; argv[n++] = "serve";
+    if (idle_secs > 0) { argv[n++] = "--exit-when-idle"; argv[n++] = ibuf; }
+    argv[n] = NULL;
     if (!me || !spawn_detached(argv, 0, log)) { fprintf(stderr, "winless: cannot start the server\n"); exit(1); }
     for (int i = 0; i < 50; i++) { if (server_alive(port)) return; msleep(100); }
     fprintf(stderr, "winless: the server did not start (see %s)\n", log);
@@ -108,7 +110,7 @@ static void ensure_server(int port) {
 
 /* POST a command (a JSON object body) to the server. */
 static int send_cmd(int port, sb_t *json, char **resp) {
-    ensure_server(port);
+    ensure_server(port, 0);
     int code = http_do(port, "POST", "/cmd", json->s, json->len, 15.0, resp, NULL);
     sb_free(json);
     if (code != 200) { fprintf(stderr, "winless: the server did not accept the command (HTTP %d)\n", code); return 1; }
@@ -166,10 +168,13 @@ static int open_window(int port, int windowed) {
     snprintf(app, sizeof app, "--app=%s", url);
     const char *b = find_browser();
     if (b) {
-        char *argv[10]; int n = 0;
+        char *argv[16]; int n = 0;
         argv[n++] = (char *)b; argv[n++] = app;
         argv[n++] = windowed ? "--window-size=1100,820" : "--start-fullscreen";
         argv[n++] = "--new-window"; argv[n++] = "--no-first-run"; argv[n++] = "--no-default-browser-check";
+        /* keep painting and running timers while another window covers this one (the window is driven from the shell) */
+        argv[n++] = "--disable-features=CalculateNativeWinOcclusion"; argv[n++] = "--disable-backgrounding-occluded-windows";
+        argv[n++] = "--disable-background-timer-throttling"; argv[n++] = "--disable-renderer-backgrounding";
         char *prof = NULL, *udd = NULL;
         size_t bl = strlen(b);
         if (bl > 4 && !strcasecmp(b + bl - 4, ".exe") && (prof = windows_profile_dir()) != NULL) {
@@ -209,13 +214,15 @@ static int ensure_window(int port, int windowed) {
 /* -------------------------------------------------------------------------------------------------- commands */
 static void usage(FILE *f) {
     fputs("usage: winless [--port N] COMMAND [ARGS]\n"
-          "  open [FILE|-] [--name N] [--line N] [--search P] [--theme dark|light] [--font F] [--size PX]\n"
+          "  open [FILE|-] [--new|--here] [--force] [--name N] [--line N] [--search P] [--theme dark|light] [--font F] [--size PX]\n"
           "       [-N] [-S] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
           "  goto LINE|N%|top|bottom      scroll [-p] N      search [-b] PATTERN   next  prev  clear\n"
           "  mark A[-B] [COLOR]  unmark   hl PATTERN [COLOR]  unhl   key KEY...   flash TEXT\n"
           "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop]\n"
           "  status [--json] [--text]     wait [--timeout S]     window [--windowed]   close\n"
-          "  serve | start | stop         --version   --help\n"
+          "  history | revert [N]    (every write keeps the old file; revert puts one back)\n"
+          "  windows   (list the open windows)    stop [--all] [--force]    serve | start      --version   --help\n"
+          "Each open starts its own server and window; with several open, commands ask which (or use --port N).\n"
           "See winless(1).\n", f);
 }
 
@@ -234,10 +241,84 @@ static char *read_stdin(size_t *len) {
     return sb_detach(&b, len);
 }
 
-static int cmd_open(int port, int argc, char **argv) {
+
+/* ---- finding the running servers: each window is its own server, on a port chosen when it was opened ---- */
+static int default_port(void) { const char *e = getenv("WINLESS_DEFAULT_PORT"); int p = e && *e ? atoi(e) : 0; return p > 0 ? p : DEFAULT_PORT; }
+
+static int free_local_port(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0); if (s < 0) return 0;
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return 0; }
+    socklen_t l = sizeof a; getsockname(s, (struct sockaddr *)&a, &l);
+    int port = ntohs(a.sin_port); close(s); return port;
+}
+
+typedef struct { int port; long clients; int dirty; char *name, *path; } sinfo;
+static void sinfo_free(sinfo *s) { free(s->name); free(s->path); s->name = s->path = NULL; }
+static int server_info(int port, sinfo *si) {
+    memset(si, 0, sizeof *si); si->port = port;
+    char *r = NULL; size_t rl = 0;
+    if (http_do(port, "GET", "/content", NULL, 0, 5.0, &r, &rl) != 200) { free(r); return 0; }
+    jv *j = json_parse(r, rl); free(r);
+    if (!j) return 0;
+    const char *n = json_gets(j, "name", NULL), *p = json_gets(j, "path", NULL);
+    si->name = xstrdup(n ? n : ""); si->path = p ? xstrdup(p) : NULL; si->dirty = json_getbool(j, "dirty", 0);
+    json_free(j);
+    si->clients = status_num(port, "clients");
+    return 1;
+}
+static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+static int list_servers(int *ports, int max) {          /* the live servers: the registry, plus the default port (old servers keep no record) */
+    int n = 0;
+    char dir[1024], pd[1100]; winless_cache_dir(dir, sizeof dir); snprintf(pd, sizeof pd, "%s/ports", dir);
+    DIR *d = opendir(pd);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && n < max) {
+            int p = atoi(e->d_name); if (p < 1 || p > 65535) continue;
+            if (server_alive(p)) ports[n++] = p;
+            else { char f[1400]; snprintf(f, sizeof f, "%s/%s", pd, e->d_name); unlink(f); }      /* a server that is gone */
+        }
+        closedir(d);
+    }
+    int dp = default_port(), have = 0;
+    for (int i = 0; i < n; i++) if (ports[i] == dp) have = 1;
+    if (!have && n < max && server_alive(dp)) ports[n++] = dp;
+    qsort(ports, (size_t)n, sizeof *ports, cmp_int);
+    return n;
+}
+static void print_windows(FILE *f, const int *ports, int n, int numbered) {
+    for (int i = 0; i < n; i++) {
+        sinfo si;
+        if (numbered) fprintf(f, "  %d) ", i + 1); else fprintf(f, "  ");
+        if (!server_info(ports[i], &si)) { fprintf(f, "port %d  (not answering)\n", ports[i]); continue; }
+        fprintf(f, "port %-5d %-8s %s%s", ports[i], si.clients > 0 ? "window" : "no window", si.name && *si.name ? si.name : "(no name)", si.dirty ? " [unsaved]" : "");
+        if (si.path) fprintf(f, "   %s", si.path);
+        fputc('\n', f); sinfo_free(&si);
+    }
+}
+/* Which server should a command act on?  One: that one.  Several: do not guess -- ask on a terminal, otherwise list them.
+ * Returns the port, 0 if there is none, -1 if the choice was not made. */
+static int resolve_port(void) {
+    int ports[64], n = list_servers(ports, 64);
+    if (n == 1) return ports[0];
+    if (n == 0) { fprintf(stderr, "winless: no window is open (start one with `winless open FILE`)\n"); return 0; }
+    if (isatty(0) && isatty(2)) {
+        fprintf(stderr, "Several windows are open:\n"); print_windows(stderr, ports, n, 1);
+        fprintf(stderr, "Which one? [1-%d] ", n);
+        char line[64]; if (!fgets(line, sizeof line, stdin)) return -1;
+        int k = atoi(line); if (k >= 1 && k <= n) return ports[k - 1];
+        fprintf(stderr, "winless: no such window\n"); return -1;
+    }
+    fprintf(stderr, "winless: %d windows are open; choose one with --port N:\n", n); print_windows(stderr, ports, n, 0);
+    return -1;
+}
+
+static int cmd_open(int port, int explicit, int argc, char **argv) {
     const char *file = NULL, *name = NULL, *search = NULL, *theme = NULL, *font = NULL;
     long line = 0, size = 0;
-    int numbers = 0, chop = 0, wait = 0, nowin = 0, windowed = 0;
+    int numbers = 0, chop = 0, wait = 0, nowin = 0, windowed = 0, force = 0, newwin = 0, here = 0;
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--name") && i + 1 < argc) name = argv[++i];
@@ -249,13 +330,40 @@ static int cmd_open(int port, int argc, char **argv) {
         else if (!strcmp(a, "-N") || !strcmp(a, "--numbers")) numbers = 1;
         else if (!strcmp(a, "-S") || !strcmp(a, "--chop")) chop = 1;
         else if (!strcmp(a, "--wait")) wait = 1;
+        else if (!strcmp(a, "--force")) force = 1;
+        else if (!strcmp(a, "--new")) newwin = 1;
+        else if (!strcmp(a, "--here")) here = 1;
         else if (!strcmp(a, "--no-window")) nowin = 1;
         else if (!strcmp(a, "--windowed")) windowed = 1;
         else if (!strcmp(a, "-") && !file) file = a;
         else if (a[0] != '-' && !file) file = a;
         else { fprintf(stderr, "winless open: unknown argument %s\n", a); return 2; }
     }
-    ensure_server(port);
+    /* Opening must never disturb a window that is already open: unless told otherwise, every open starts its own server,
+     * on a port chosen now, and that server serves only this window.  --here replaces the text of the one existing window. */
+    int fresh = 0;
+    if (!explicit) {
+        if (here) { int p = resolve_port(); if (p <= 0) return p == 0 ? 1 : 2; port = p; }
+        else {
+            char *rp0 = (file && strcmp(file, "-")) ? realpath(file, NULL) : NULL;
+            if (rp0 && !newwin) {
+                int ports[64], n = list_servers(ports, 64);
+                for (int i = 0; i < n; i++) {
+                    sinfo si;
+                    if (server_info(ports[i], &si)) {
+                        int same = si.path && !strcmp(si.path, rp0);
+                        sinfo_free(&si);
+                        if (same) { printf("already open on port %d (see `winless windows`); use --new for another window\n", ports[i]); free(rp0); return 0; }
+                    }
+                }
+            }
+            free(rp0);
+            port = free_local_port();
+            if (!port) { fprintf(stderr, "winless open: cannot find a free port\n"); return 1; }
+            fresh = 1;
+        }
+    }
+    ensure_server(port, fresh && !nowin ? 60.0 : 0);              /* a server made for a window quits once the window is gone and nothing is unsaved */
     char *data; size_t dlen;
     if (!file || !strcmp(file, "-")) {
         if (!file && isatty(0)) { fprintf(stderr, "winless open: give a FILE, or pipe text in\n"); return 2; }
@@ -268,9 +376,10 @@ static int cmd_open(int port, int argc, char **argv) {
     long since = status_num(port, "seq");
     sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, data, dlen); free(data);
     sb_t b; sb_init(&b);
-    sb_puts(&b, "{\"cmd\":\"load\"");
+    sb_puts(&b, "{\"cmd\":\"load\""); if (force) sb_puts(&b, ",\"force\":true");
     jopt(&b, "name", name);
     jkey(&b, "text"); json_put_string(&b, clean.s, clean.len); sb_free(&clean);
+    { char *rp = (file && strcmp(file, "-")) ? realpath(file, NULL) : NULL; jopt(&b, "path", rp); free(rp); }
     jopt(&b, "search", search);
     jkey(&b, "line"); if (line > 0) sb_printf(&b, "%ld", line); else sb_puts(&b, "null");
     sb_puts(&b, ",\"settings\":{");
@@ -281,8 +390,13 @@ static int cmd_open(int port, int argc, char **argv) {
     if (numbers) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"numbers\":true"); first = 0; }
     if (chop) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"wrap\":false"); }
     sb_puts(&b, "}}");
-    if (send_cmd(port, &b, NULL)) return 1;
+    char *lresp = NULL;
+    if (send_cmd(port, &b, &lresp)) return 1;
+    { jv *lj = json_parse(lresp ? lresp : "", lresp ? strlen(lresp) : 0); free(lresp);
+      if (lj && !json_getbool(lj, "ok", 1)) { const char *e = json_gets(lj, "error", NULL); fprintf(stderr, "winless open: %s\n", e ? e : "refused"); json_free(lj); return 1; }
+      json_free(lj); }
     if (!nowin) ensure_window(port, windowed);
+    if (fresh) printf("opened on port %d\n", port);
     if (wait) {
         char path[96]; snprintf(path, sizeof path, "/wait?since=%ld&timeout=86400", since);
         char *r = NULL; size_t rl = 0;
@@ -295,13 +409,65 @@ static int cmd_open(int port, int argc, char **argv) {
     return 0;
 }
 
+/* winless edit R1 C1 R2 C2 TEXT|-   replace the range [R1:C1, R2:C2) (rows from 1, columns in code points from 1, end excluded)
+ * winless undo                       undo the last edit
+ * winless redo                       redo the last undone edit
+ * winless write [-f]                 write the text to its file (-f: even if the file changed on disk) */
+static int cmd_edit(int port, const char *cmd, int argc, char **argv) {
+    sb_t b; sb_init(&b); sb_printf(&b, "{\"cmd\":\"%s\"", cmd);
+    if (!strcmp(cmd, "edit")) {
+        if (argc != 5) { sb_free(&b); fprintf(stderr, "usage: winless edit R1 C1 R2 C2 TEXT|-\n"); return 2; }
+        const char *names[4] = { "r1", "c1", "r2", "c2" };
+        for (int i = 0; i < 4; i++) { jkey(&b, names[i]); json_put_number(&b, atof(argv[i])); }
+        char *txt = NULL; size_t tl = 0;
+        if (!strcmp(argv[4], "-")) txt = read_stdin(&tl); else { txt = xstrdup(argv[4]); tl = strlen(txt); }
+        sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, txt, tl); free(txt);
+        jkey(&b, "text"); json_put_string(&b, clean.s, clean.len); sb_free(&clean);
+    } else if (!strcmp(cmd, "write") && argc > 0 && !strcmp(argv[0], "-f")) sb_puts(&b, ",\"force\":true");
+    else if (!strcmp(cmd, "revert")) {                      /* revert [N] [--force]: put back version N (default the latest) of the file */
+        for (int i = 0; i < argc; i++) {
+            if (!strcmp(argv[i], "--force") || !strcmp(argv[i], "-f")) sb_puts(&b, ",\"force\":true");
+            else if (is_num(argv[i])) { jkey(&b, "n"); json_put_number(&b, atof(argv[i])); }
+            else { sb_free(&b); fprintf(stderr, "usage: winless revert [N] [--force]\n"); return 2; }
+        }
+    }
+    sb_putc(&b, '}');
+    char *resp = NULL;
+    if (send_cmd(port, &b, &resp)) return 1;
+    jv *j = json_parse(resp ? resp : "", resp ? strlen(resp) : 0); free(resp);
+    int ok = json_getbool(j, "ok", 0);
+    if (!ok) { const char *e = json_gets(j, "error", NULL); fprintf(stderr, "winless %s: %s\n", cmd, e ? e : "failed"); }
+    json_free(j);
+    return ok ? 0 : 1;
+}
+
+/* winless history: the earlier versions of the file that writes have kept, oldest first (winless revert N puts one back) */
+static int cmd_history(int port) {
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"history\"}");
+    char *resp = NULL;
+    if (send_cmd(port, &b, &resp)) return 1;
+    jv *j = json_parse(resp ? resp : "", resp ? strlen(resp) : 0); free(resp);
+    if (!j || !json_getbool(j, "ok", 0)) { const char *e = j ? json_gets(j, "error", NULL) : NULL; fprintf(stderr, "winless history: %s\n", e ? e : "failed"); json_free(j); return 1; }
+    const jv *items = json_get(j, "items");
+    printf("%s\n", json_gets(j, "path", NULL));
+    if (!items || items->t != J_ARR || items->n == 0) puts("  (no earlier versions kept yet)");
+    else for (size_t i = 0; i < items->n; i++) {
+        const jv *it = items->items[i]; const char *t = json_gets(it, "time", NULL);
+        char when[40] = "";
+        if (t && strlen(t) >= 16) snprintf(when, sizeof when, "%.4s-%.2s-%.2s %.2s:%.2s:%.2s UTC", t, t + 4, t + 6, t + 9, t + 11, t + 13);
+        printf("  %4.0f  %s  %.0f bytes\n", json_getnum(it, "n", 0), when, json_getnum(it, "bytes", 0));
+    }
+    json_free(j);
+    return 0;
+}
+
 static int cmd_status(int port, int argc, char **argv) {
     int json = 0, text = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1; else if (!strcmp(argv[i], "--text")) text = 1;
         else { fprintf(stderr, "winless status: unknown argument %s\n", argv[i]); return 2; }
     }
-    ensure_server(port);
+    ensure_server(port, 0);
     char *r = NULL; size_t rl = 0;
     if (http_do(port, "GET", "/status", NULL, 0, 10.0, &r, &rl) != 200) { fprintf(stderr, "winless: no status\n"); free(r); return 1; }
     if (json) { printf("%s\n", r); free(r); return 0; }
@@ -333,7 +499,7 @@ static int cmd_wait(int port, int argc, char **argv) {
         if (!strcmp(argv[i], "--timeout") && i + 1 < argc) timeout = atof(argv[++i]);
         else { fprintf(stderr, "winless wait: unknown argument %s\n", argv[i]); return 2; }
     }
-    ensure_server(port);
+    ensure_server(port, 0);
     long since = status_num(port, "seq");
     char path[128]; snprintf(path, sizeof path, "/wait?since=%ld&timeout=%g", since, timeout);
     char *r = NULL; size_t rl = 0;
@@ -347,26 +513,66 @@ static int cmd_wait(int port, int argc, char **argv) {
     return to ? 1 : 0;
 }
 
-int client_main(int port, int argc, char **argv) {
+int client_main(int port, int explicit_port, int argc, char **argv) {
     if (argc < 1) { usage(stderr); return 2; }
     const char *cmd = argv[0];
     int ac = argc - 1; char **av = argv + 1;
     sb_t b;
 
     if (!strcmp(cmd, "help")) { usage(stdout); return 0; }
-    if (!strcmp(cmd, "serve")) return server_run(port);
-    if (!strcmp(cmd, "start")) { ensure_server(port); printf("winless server on port %d\n", port); return 0; }
-    if (!strcmp(cmd, "stop")) {
-        if (server_alive(port)) { char *r = NULL; http_do(port, "POST", "/cmd", "{\"cmd\":\"stop\"}", 14, 5.0, &r, NULL); free(r); }
+    int stop_all = !strcmp(cmd, "stop") && ac > 0 && (!strcmp(av[0], "--all") || (ac > 1 && !strcmp(av[1], "--all")));
+    if (!strcmp(cmd, "windows") || !strcmp(cmd, "list")) {
+        int ports[64], n = list_servers(ports, 64);
+        if (!n) { puts("no windows open"); return 0; }
+        print_windows(stdout, ports, n, 0);
         return 0;
     }
-    if (!strcmp(cmd, "open")) return cmd_open(port, ac, av);
+    if (!explicit_port) {
+        int own = !strcmp(cmd, "open") || stop_all;
+        if (!strcmp(cmd, "serve") || !strcmp(cmd, "start")) port = default_port();
+        else if (!own) { int p = resolve_port(); if (p == 0) return 1; if (p < 0) return 2; port = p; }
+    }
+    if (!strcmp(cmd, "serve")) {
+        double idle = 0;
+        for (int i = 0; i + 1 < ac; i++) if (!strcmp(av[i], "--exit-when-idle")) idle = atof(av[i + 1]);
+        return server_run(port, idle);
+    }
+    if (!strcmp(cmd, "start")) { ensure_server(port, 0); printf("winless server on port %d\n", port); return 0; }
+    if (!strcmp(cmd, "stop")) {
+        int force = 0; for (int i = 0; i < ac; i++) if (!strcmp(av[i], "--force")) force = 1;
+        int ports[64], n = 0, refused = 0;
+        if (stop_all) n = list_servers(ports, 64); else { ports[0] = port; n = 1; }
+        for (int i = 0; i < n; i++) {
+            if (!server_alive(ports[i])) continue;
+            char *r = NULL; size_t rl = 0;
+            const char *body = force ? "{\"cmd\":\"stop\",\"force\":true}" : "{\"cmd\":\"stop\"}";
+            http_do(ports[i], "POST", "/cmd", body, strlen(body), 5.0, &r, &rl);
+            jv *j = json_parse(r ? r : "", r ? rl : 0); free(r);
+            if (j && !json_getbool(j, "ok", 1)) { const char *e = json_gets(j, "error", NULL); fprintf(stderr, "winless stop (port %d): %s\n", ports[i], e ? e : "refused"); refused = 1; }
+            json_free(j);
+        }
+        return refused ? 1 : 0;
+    }
+    if (!strcmp(cmd, "open")) return cmd_open(port, explicit_port, ac, av);
     if (!strcmp(cmd, "status")) return cmd_status(port, ac, av);
+    if (!strcmp(cmd, "history")) return cmd_history(port);
+    if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "revert")) return cmd_edit(port, cmd, ac, av);
     if (!strcmp(cmd, "wait")) return cmd_wait(port, ac, av);
     if (!strcmp(cmd, "window")) {
         int windowed = ac > 0 && !strcmp(av[0], "--windowed");
-        ensure_server(port);
+        ensure_server(port, 0);
         return ensure_window(port, windowed) ? 0 : 1;
+    }
+    if (!strcmp(cmd, "type")) {                            /* winless type [--commit] TEXT: fill the open bottom panel (and apply it) */
+        int commit = ac > 0 && !strcmp(av[0], "--commit");
+        if (ac < 1 + commit) { fprintf(stderr, "usage: winless type [--commit] TEXT\n"); return 2; }
+        sb_init(&b); sb_puts(&b, "{\"cmd\":\"type\""); jopt(&b, "text", av[commit]); if (commit) sb_puts(&b, ",\"commit\":true"); sb_putc(&b, '}');
+        return send_cmd(port, &b, NULL);
+    }
+    if (!strcmp(cmd, "ex")) {                              /* winless ex COMMAND: run an ex command (s/a/b/g, 5, w ...) in the window */
+        if (ac < 1) { fprintf(stderr, "usage: winless ex COMMAND\n"); return 2; }
+        sb_init(&b); sb_puts(&b, "{\"cmd\":\"ex\""); jopt(&b, "text", av[0]); sb_putc(&b, '}');
+        return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "goto")) {
         if (ac != 1) { fprintf(stderr, "usage: winless goto LINE|N%%|top|bottom\n"); return 2; }

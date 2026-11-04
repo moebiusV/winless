@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "testlib.h"
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -45,6 +46,21 @@ void test_fail(const char *file, int line, const char *fmt, ...) {
     longjmp(g_jmp, 1);
 }
 
+/* Servers that a test started by itself (winless open, without --port) are recorded in the registry: stop them all. */
+static void kill_registered_servers(void) {
+    char pd[1400]; snprintf(pd, sizeof pd, "%s/home/.cache/winless/ports", g_tmp);
+    DIR *d = opendir(pd); if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char f[2000]; snprintf(f, sizeof f, "%s/%s", pd, e->d_name);
+        long pid = 0; FILE *fp = fopen(f, "r"); if (fp) { if (fscanf(fp, "%ld", &pid) != 1) pid = 0; fclose(fp); }
+        if (pid > 1) { kill((pid_t)pid, SIGKILL); waitpid((pid_t)pid, NULL, WNOHANG); }
+        unlink(f);
+    }
+    closedir(d);
+}
+
 /* One test: (start server,) run, close sockets, (stop server). The setjmp lives here so the caller's loop is not clobbered. */
 static int run_one(const testcase *t) {
     volatile int ok = 1;
@@ -59,6 +75,7 @@ static int run_one(const testcase *t) {
         if (setjmp(g_jmp) != 0) { if (ok) ok = 0; else memcpy(g_failmsg, saved, sizeof saved); }   /* a failure at stop time (sanitizer output) */
         else server_stop();
     }
+    kill_registered_servers();                 /* after the harness server has been stopped: it is registered too */
     return ok;
 }
 
@@ -86,8 +103,10 @@ static void init_common(void) {
     mkdir(home, 0755);
     setenv("HOME", home, 1);                /* the server log of auto-started servers goes here, not into the real ~ */
     unsetenv("XDG_CACHE_HOME");
+    unsetenv("XDG_DATA_HOME");
     unsetenv("WINLESS_PORT");
     unsetenv("WINLESS_BROWSER");
+    { char dp[16]; snprintf(dp, sizeof dp, "%d", free_port()); setenv("WINLESS_DEFAULT_PORT", dp, 1); }   /* tests never look at the real port 8777 */
 }
 
 void testlib_init_noserver(void) { init_common(); }
@@ -368,6 +387,28 @@ run_t cli_finish(pid_t pid, int out_fd, double timeout) {
     }
     r.code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
     return r;
+}
+
+/* Like cli_run, but without --port: the command finds the servers itself (and has no terminal to ask on). */
+run_t cli_auto(char *const args[]) {
+    int outp[2];
+    if (pipe(outp) < 0) FAIL("pipe failed");
+    size_t na = 0; while (args[na]) na++;
+    char **argv = xmalloc((na + 2) * sizeof *argv);
+    argv[0] = (char *)g_bin;
+    for (size_t i = 0; i < na; i++) argv[1 + i] = args[i];
+    argv[1 + na] = NULL;
+    pid_t pid = fork();
+    if (pid < 0) FAIL("fork failed");
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDONLY); if (nul >= 0) dup2(nul, 0);
+        dup2(outp[1], 1); close(outp[0]); close(outp[1]);
+        execv(g_bin, argv);
+        _exit(127);
+    }
+    free(argv);
+    close(outp[1]);
+    return cli_finish(pid, outp[0], 60.0);
 }
 
 run_t cli_run(const char *input, size_t inlen, char *const args[]) {

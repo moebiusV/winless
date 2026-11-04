@@ -61,6 +61,8 @@ typedef struct { int code; char *out; size_t outlen; } run_t;
 /* run `winless --port PORT ARGS...` (argv after the program name, NULL-terminated); input is fed to stdin */
 run_t cli_run(const char *input, size_t inlen, char *const args[]);
 #define CLI(...) cli_run(NULL, 0, (char *const[]){ __VA_ARGS__, NULL })
+run_t cli_auto(char *const args[]);                            /* no --port: the command finds or starts servers itself */
+#define CLI_AUTO(...) cli_auto((char *const[]){ __VA_ARGS__, NULL })
 #define CLI_IN(input, len, ...) cli_run((input), (len), (char *const[]){ __VA_ARGS__, NULL })
 pid_t cli_spawn(char *const args[], int *out_fd);             /* start without waiting (stdout on *out_fd) */
 run_t cli_finish(pid_t pid, int out_fd, double timeout);      /* collect a spawned command's output and exit code */

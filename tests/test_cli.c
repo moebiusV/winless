@@ -225,6 +225,275 @@ static void t_version_and_help(void) {
     free(h.out);
 }
 
+static char *content_text(void) {            /* the server's current text (caller frees) */
+    jv *c = get_json("/content");
+    char *t = xstrdup(json_gets(c, "text", NULL)); json_free(c);
+    return t;
+}
+static int content_dirty(void) { jv *c = get_json("/content"); int d = json_getbool(c, "dirty", -1); json_free(c); return d; }
+
+static void t_edit_undo_write(void) {
+    char *f = tmp_write("edit.txt", "alpha\nbeta\ngamma\n", 17);
+    expect_ok(CLI("open", f, "--no-window"));
+    jv *c = get_json("/content");
+    CHECK_STR(json_gets(c, "path", NULL), f);                                  /* the server learns the file's path */
+    CHECK_INT(json_getbool(c, "dirty", -1), 0);
+    json_free(c);
+
+    sse_t *page = sse_open(); wait_clients(1);
+    expect_ok(CLI("edit", "2", "1", "2", "5", "BETA"));
+    char *t = content_text(); CHECK_STR(t, "alpha\nBETA\ngamma\n"); free(t);
+    CHECK_INT(content_dirty(), 1);
+    CHECK_INT(sse_wait(page, 1, 5), 1);
+    CHECK_STR(sse_event(page, 0), "{\"cmd\":\"reload\"}");                      /* pages re-read the text, keeping their place */
+    size_t dl; char *disk = read_file(f, &dl); CHECK_STR(disk, "alpha\nbeta\ngamma\n"); free(disk);   /* not written yet */
+
+    expect_ok(CLI("edit", "3", "1", "3", "4", "\xC3\xA9t\xC3\xA9"));            /* multibyte replacement: "gam" -> "été" */
+    t = content_text(); CHECK_STR(t, "alpha\nBETA\n\xC3\xA9t\xC3\xA9ma\n"); free(t);
+    expect_ok(CLI("edit", "3", "4", "3", "4", "!"));                           /* an insertion: columns count code points */
+    t = content_text(); CHECK_STR(t, "alpha\nBETA\n\xC3\xA9t\xC3\xA9!ma\n"); free(t);
+
+    expect_ok(CLI("write"));
+    disk = read_file(f, &dl); CHECK_STR(disk, "alpha\nBETA\n\xC3\xA9t\xC3\xA9!ma\n"); free(disk);
+    CHECK_INT(content_dirty(), 0);
+
+    expect_ok(CLI("undo")); expect_ok(CLI("undo"));
+    t = content_text(); CHECK_STR(t, "alpha\nBETA\ngamma\n"); free(t);
+    CHECK_INT(content_dirty(), 1);                                             /* the file on disk still has the later text */
+    expect_ok(CLI("undo"));
+    t = content_text(); CHECK_STR(t, "alpha\nbeta\ngamma\n"); free(t);
+    run_t u = CLI("undo");                                                     /* nothing left */
+    CHECK_INT(u.code, 1); free(u.out);
+    jv *e = post_json("/cmd", "{\"cmd\":\"undo\"}"); CHECK_STR(json_gets(e, "error", NULL), "nothing to undo"); json_free(e);
+    sse_close(page);
+}
+
+static void t_edit_rejects_bad_ranges_and_changed_files(void) {
+    char *f = tmp_write("guard.txt", "one\ntwo\n", 8);
+    expect_ok(CLI("open", f, "--no-window"));
+    run_t r = CLI("edit", "9", "1", "9", "1", "x");
+    CHECK_INT(r.code, 1); free(r.out);
+    jv *e = post_json("/cmd", "{\"cmd\":\"edit\",\"r1\":9,\"c1\":1,\"r2\":9,\"c2\":1,\"text\":\"x\"}");
+    CHECK_STR(json_gets(e, "error", NULL), "range out of bounds"); json_free(e);
+    r = CLI("edit", "2", "1", "1", "1", "x");                                  /* end before begin */
+    CHECK_INT(r.code, 1); free(r.out);
+    char *t = content_text(); CHECK_STR(t, "one\ntwo\n"); free(t);
+
+    expect_ok(CLI("edit", "1", "1", "1", "4", "ONE"));
+    msleep(30);
+    tmp_write("guard.txt", "changed elsewhere\n", 18);                         /* someone else edits the file meanwhile */
+    r = CLI("write");
+    CHECK_INT(r.code, 1); free(r.out);
+    e = post_json("/cmd", "{\"cmd\":\"write\"}"); CHECK_CONTAINS(json_gets(e, "error", NULL), "changed on disk"); json_free(e);
+    size_t dl; char *disk = read_file(f, &dl); CHECK_STR(disk, "changed elsewhere\n"); free(disk);      /* untouched */
+    expect_ok(CLI("write", "-f"));
+    disk = read_file(f, &dl); CHECK_STR(disk, "ONE\ntwo\n"); free(disk);
+    CHECK_INT(content_dirty(), 0);
+}
+
+static void t_write_needs_a_file(void) {
+    expect_ok(CLI_IN("some text\n", 10, "open", "-", "--no-window"));
+    run_t r = CLI("write");
+    CHECK_INT(r.code, 1); free(r.out);
+    jv *e = post_json("/cmd", "{\"cmd\":\"write\"}"); CHECK_CONTAINS(json_gets(e, "error", NULL), "no file"); json_free(e);
+    expect_ok(CLI("edit", "1", "1", "1", "5", "SOME"));                        /* editing in memory is still allowed */
+    char *t = content_text(); CHECK_STR(t, "SOME text\n"); free(t);
+}
+
+static void t_redo(void) {
+    char *f = tmp_write("redo.txt", "alpha\nbeta\n", 11);
+    expect_ok(CLI("open", f, "--no-window"));
+    expect_ok(CLI("edit", "1", "1", "1", "6", "ALPHA"));
+    expect_ok(CLI("edit", "2", "1", "2", "5", "BETA!"));
+    expect_ok(CLI("undo")); expect_ok(CLI("undo"));
+    char *t = content_text(); CHECK_STR(t, "alpha\nbeta\n"); free(t);
+    expect_ok(CLI("redo"));
+    t = content_text(); CHECK_STR(t, "ALPHA\nbeta\n"); free(t);
+    expect_ok(CLI("redo"));
+    t = content_text(); CHECK_STR(t, "ALPHA\nBETA!\n"); free(t);
+    run_t r = CLI("redo"); CHECK_INT(r.code, 1); free(r.out);                     /* nothing left to redo */
+    expect_ok(CLI("undo"));                                                       /* and a new edit empties the redo stack */
+    expect_ok(CLI("edit", "2", "1", "2", "5", "new"));
+    r = CLI("redo"); CHECK_INT(r.code, 1); free(r.out);
+    t = content_text(); CHECK_STR(t, "ALPHA\nnew\n"); free(t);
+    expect_ok(CLI("undo")); expect_ok(CLI("undo")); expect_ok(CLI("redo"));       /* redo still lines up after undoing past an insertion */
+    t = content_text(); CHECK_STR(t, "ALPHA\nbeta\n"); free(t);
+}
+
+static void t_unsaved_changes_are_not_discarded(void) {
+    char *f1 = tmp_write("keep1.txt", "one\ntwo\n", 8), *f2 = tmp_write("keep2.txt", "other\n", 6);
+    expect_ok(CLI("open", f1, "--no-window"));
+    expect_ok(CLI("edit", "1", "1", "1", "4", "ONE"));                         /* now there are unsaved edits */
+    run_t r = CLI("open", f2, "--no-window");                                  /* opening another file would discard them */
+    CHECK_INT(r.code, 1); free(r.out);
+    jv *c = get_json("/content"); CHECK_STR(json_gets(c, "name", NULL), "keep1.txt"); CHECK_STR(json_gets(c, "text", NULL), "ONE\ntwo\n"); json_free(c);
+    r = CLI("stop"); CHECK_INT(r.code, 1); free(r.out);                        /* and so would stopping the server */
+    json_free(get_json("/status"));                                            /* the server is still there */
+    expect_ok(CLI("write"));                                                   /* once written there is nothing to lose */
+    expect_ok(CLI("open", f2, "--no-window"));
+    c = get_json("/content"); CHECK_STR(json_gets(c, "name", NULL), "keep2.txt"); json_free(c);
+    expect_ok(CLI("edit", "1", "1", "1", "6", "OTHER"));
+    expect_ok(CLI("open", f1, "--no-window", "--force"));                      /* --force discards on purpose */
+    c = get_json("/content"); CHECK_STR(json_gets(c, "name", NULL), "keep1.txt"); json_free(c);
+}
+
+/* ---- one server per window ---- */
+static int port_in(const char *list, const char *name) {          /* the port on the line of `winless windows` that names this file */
+    for (const char *p = list; p && *p;) {
+        const char *eol = strchr(p, '\n'); size_t n = eol ? (size_t)(eol - p) : strlen(p);
+        char line[1024]; if (n >= sizeof line) n = sizeof line - 1; memcpy(line, p, n); line[n] = 0;
+        int port;
+        if (strstr(line, name) && sscanf(strstr(line, "port ") ? strstr(line, "port ") : "", "port %d", &port) == 1) return port;
+        p = eol ? eol + 1 : NULL;
+    }
+    return 0;
+}
+static int count_windows(const char *list) { int n = 0; for (const char *p = list; (p = strstr(p, "port ")); p++) n++; return n; }
+
+static void t_each_open_has_its_own_server(void) {
+    char *a = tmp_write("wa.txt", "aaa\n", 4), *b = tmp_write("wb.txt", "bbb\n", 4);
+    run_t w = CLI_AUTO("windows"); CHECK_CONTAINS(w.out, "no windows"); free(w.out);
+    run_t r = CLI_AUTO("open", a, "--no-window"); CHECK_INT(r.code, 0); free(r.out);
+    r = CLI_AUTO("open", b, "--no-window"); CHECK_INT(r.code, 0); free(r.out);       /* a second file: a second server, the first is untouched */
+    w = CLI_AUTO("windows");
+    CHECK_INT(count_windows(w.out), 2);
+    int pa = port_in(w.out, "wa.txt"), pb = port_in(w.out, "wb.txt");
+    free(w.out);
+    CHECK(pa > 0 && pb > 0 && pa != pb);
+    g_port = pa; jv *c = get_json("/content"); CHECK_STR(json_gets(c, "name", NULL), "wa.txt"); CHECK_STR(json_gets(c, "text", NULL), "aaa\n"); json_free(c);
+    g_port = pb; c = get_json("/content"); CHECK_STR(json_gets(c, "name", NULL), "wb.txt"); json_free(c);
+    g_port = pa; expect_ok(CLI("edit", "1", "1", "1", "4", "AAA"));                   /* an edit in one does not touch the other */
+    g_port = pb; CHECK_INT(content_dirty(), 0); g_port = pa; CHECK_INT(content_dirty(), 1);
+    expect_ok(CLI("write"));
+}
+
+static void t_open_does_not_duplicate_a_file(void) {
+    char *a = tmp_write("dup.txt", "x\n", 2);
+    expect_ok(CLI_AUTO("open", a, "--no-window"));
+    run_t r = CLI_AUTO("open", a, "--no-window");                                    /* already open: nothing new is started */
+    CHECK_INT(r.code, 0); CHECK_CONTAINS(r.out, "already open"); free(r.out);
+    run_t w = CLI_AUTO("windows"); CHECK_INT(count_windows(w.out), 1); free(w.out);
+    expect_ok(CLI_AUTO("open", a, "--no-window", "--new"));                          /* unless asked */
+    w = CLI_AUTO("windows"); CHECK_INT(count_windows(w.out), 2); free(w.out);
+}
+
+static void t_several_windows_means_choose(void) {
+    char *a = tmp_write("ca.txt", "a\n", 2), *b = tmp_write("cb.txt", "b\n", 2);
+    expect_ok(CLI_AUTO("open", a, "--no-window"));
+    expect_ok(CLI_AUTO("goto", "1"));                                                /* one window: no question */
+    expect_ok(CLI_AUTO("open", b, "--no-window"));
+    run_t r = CLI_AUTO("goto", "1");                                                 /* two windows and no terminal: it lists them and refuses */
+    CHECK_INT(r.code, 2); free(r.out);
+    r = CLI_AUTO("status", "--json"); CHECK_INT(r.code, 2); free(r.out);
+    run_t w = CLI_AUTO("windows"); int pb = port_in(w.out, "cb.txt"); free(w.out);
+    g_port = pb;
+    r = CLI("status", "--json"); CHECK_INT(r.code, 0); CHECK_CONTAINS(r.out, "cb.txt"); free(r.out);     /* --port picks one */
+}
+
+static void t_here_replaces_the_one_window(void) {
+    char *a = tmp_write("ha.txt", "a\n", 2), *b = tmp_write("hb.txt", "b\n", 2);
+    expect_ok(CLI_AUTO("open", a, "--no-window"));
+    expect_ok(CLI_AUTO("open", b, "--here", "--no-window"));                         /* the old behaviour, on request */
+    run_t w = CLI_AUTO("windows"); CHECK_INT(count_windows(w.out), 1); CHECK_CONTAINS(w.out, "hb.txt"); free(w.out);
+}
+
+static void t_stop_all_keeps_unsaved_work(void) {
+    char *a = tmp_write("sa.txt", "a\n", 2), *b = tmp_write("sb.txt", "b\n", 2);
+    expect_ok(CLI_AUTO("open", a, "--no-window")); expect_ok(CLI_AUTO("open", b, "--no-window"));
+    run_t w = CLI_AUTO("windows"); int pa = port_in(w.out, "sa.txt"); free(w.out);
+    g_port = pa; expect_ok(CLI("edit", "1", "1", "1", "2", "A"));                    /* unsaved edits in one of them */
+    run_t r = CLI_AUTO("stop", "--all"); CHECK_INT(r.code, 1); free(r.out);          /* refused for that one ... */
+    w = CLI_AUTO("windows"); CHECK_INT(count_windows(w.out), 1); CHECK_CONTAINS(w.out, "sa.txt"); CHECK_CONTAINS(w.out, "[unsaved]"); free(w.out);   /* ... the clean one stopped */
+    expect_ok(CLI_AUTO("stop", "--all", "--force"));
+    msleep(300);
+    w = CLI_AUTO("windows"); CHECK_CONTAINS(w.out, "no windows"); free(w.out);
+}
+
+static void wait_for_ping(void) {                                   /* a server just spawned: wait until it answers */
+    for (int i = 0; i < 100; i++) { resp_t r = http("GET", "/ping", NULL, 0); int ok = r.status == 200; free(r.body); if (ok) return; msleep(50); }
+    FAIL("the server did not start");
+}
+
+static void t_quitting_discards_unsaved_edits(void) {
+    /* a server made for a window ends with it: when the window quits, or a while after it is gone, even with unsaved edits */
+    char *f = tmp_write("quitme.txt", "one\n", 4);
+    g_port = free_port();
+    char *serve[] = { "serve", "--exit-when-idle", "600", NULL };
+    int out; pid_t pid = cli_spawn(serve, &out);
+    wait_for_ping();
+    expect_ok(CLI("open", f, "--no-window"));
+    expect_ok(CLI("edit", "1", "1", "1", "4", "ONE"));
+    CHECK_INT(content_dirty(), 1);
+    json_free(post_json("/event", "{\"type\":\"quit\"}"));                 /* the window says :q! */
+    run_t r = cli_finish(pid, out, 20.0);                                  /* the server ends by itself, soon */
+    CHECK_INT(r.code, 0); free(r.out);
+    size_t n; char *disk = read_file(f, &n); CHECK_STR(disk, "one\n"); free(disk);   /* the file was never written */
+}
+
+static void t_idle_server_with_unsaved_edits_exits_too(void) {
+    char *f = tmp_write("goneme.txt", "one\n", 4);
+    g_port = free_port();
+    char *serve[] = { "serve", "--exit-when-idle", "2", NULL };
+    int out; pid_t pid = cli_spawn(serve, &out);
+    wait_for_ping();
+    expect_ok(CLI("open", f, "--no-window"));
+    expect_ok(CLI("edit", "1", "1", "1", "4", "ONE"));                     /* unsaved, and no window connected */
+    run_t r = cli_finish(pid, out, 30.0);
+    CHECK_INT(r.code, 0); free(r.out);
+}
+
+static void t_idle_server_exits(void) {
+    g_port = free_port();
+    run_t r = CLI("serve", "--exit-when-idle", "1");           /* no window ever connects and nothing is unsaved: it quits by itself */
+    CHECK_INT(r.code, 0); free(r.out);
+    run_t w = CLI_AUTO("windows"); CHECK_CONTAINS(w.out, "no windows"); free(w.out);      /* and removes its record */
+}
+
+static size_t history_count(void) {
+    jv *j = post_json("/cmd", "{\"cmd\":\"history\"}");
+    const jv *items = json_get(j, "items"); size_t n = items ? items->n : 0;
+    json_free(j); return n;
+}
+static void check_disk(const char *f, const char *want) { size_t n; char *d = read_file(f, &n); CHECK_STR(d, want); free(d); }
+
+static void t_every_write_can_be_reverted(void) {
+    char *f = tmp_write("rev.txt", "v0\n", 3);
+    expect_ok(CLI("open", f, "--no-window"));
+    CHECK_INT(history_count(), 0);
+    run_t r = CLI("revert"); CHECK_INT(r.code, 1); free(r.out);                   /* nothing kept yet */
+    expect_ok(CLI("edit", "1", "1", "1", "3", "v1")); expect_ok(CLI("write"));    /* this write keeps v0 */
+    expect_ok(CLI("edit", "1", "1", "1", "3", "v2")); expect_ok(CLI("write"));    /* this one keeps v1 */
+    CHECK_INT(history_count(), 2);
+    expect_ok(CLI("write"));                                                      /* writing what is already there keeps nothing new */
+    CHECK_INT(history_count(), 2);
+    r = CLI("history"); CHECK_INT(r.code, 0); CHECK_CONTAINS(r.out, "bytes"); free(r.out);
+
+    expect_ok(CLI("revert"));                                                     /* put back the latest kept version: v1 */
+    check_disk(f, "v1\n"); char *t = content_text(); CHECK_STR(t, "v1\n"); free(t); CHECK_INT(content_dirty(), 0);
+    CHECK_INT(history_count(), 3);                                                /* the revert kept v2, so it can be reverted */
+    expect_ok(CLI("revert", "3")); check_disk(f, "v2\n");
+    expect_ok(CLI("revert", "1")); check_disk(f, "v0\n");                         /* all the way back to the original */
+    r = CLI("revert", "99"); CHECK_INT(r.code, 1); free(r.out); check_disk(f, "v0\n");   /* no such version: nothing changes */
+
+    expect_ok(CLI("edit", "1", "1", "1", "3", "new"));                            /* unsaved edits are not silently replaced */
+    r = CLI("revert"); CHECK_INT(r.code, 1); free(r.out);
+    t = content_text(); CHECK_STR(t, "new\n"); free(t);
+    expect_ok(CLI("write"));
+}
+
+static void t_overwriting_someone_elses_change_is_recoverable(void) {
+    char *f = tmp_write("theirs.txt", "mine\n", 5);
+    expect_ok(CLI("open", f, "--no-window"));
+    msleep(30);
+    tmp_write("theirs.txt", "someone else's edit\n", 20);                         /* the file changes behind winless's back */
+    expect_ok(CLI("edit", "1", "1", "1", "5", "MINE"));
+    run_t r = CLI("write"); CHECK_INT(r.code, 1); free(r.out);                    /* refused ... */
+    expect_ok(CLI("write", "-f"));                                                /* ... and when forced, their version is kept */
+    check_disk(f, "MINE\n");
+    expect_ok(CLI("revert"));
+    check_disk(f, "someone else's edit\n");
+}
+
 int main(void) {
     testlib_init();
     static const testcase tests[] = {
@@ -241,6 +510,21 @@ int main(void) {
         { "cli_starts_and_stops_its_own_server", t_cli_starts_and_stops_its_own_server, 0 },
         { "any_command_autostarts_the_server", t_any_command_autostarts_the_server, 0 },
         { "version_and_help", t_version_and_help, 0 },
+        { "edit_undo_write", t_edit_undo_write, 1 },
+        { "edit_rejects_bad_ranges_and_changed_files", t_edit_rejects_bad_ranges_and_changed_files, 1 },
+        { "write_needs_a_file", t_write_needs_a_file, 1 },
+        { "redo", t_redo, 1 },
+        { "every_write_can_be_reverted", t_every_write_can_be_reverted, 1 },
+        { "overwriting_someone_elses_change_is_recoverable", t_overwriting_someone_elses_change_is_recoverable, 1 },
+        { "unsaved_changes_are_not_discarded", t_unsaved_changes_are_not_discarded, 1 },
+        { "each_open_has_its_own_server", t_each_open_has_its_own_server, 0 },
+        { "open_does_not_duplicate_a_file", t_open_does_not_duplicate_a_file, 0 },
+        { "several_windows_means_choose", t_several_windows_means_choose, 0 },
+        { "here_replaces_the_one_window", t_here_replaces_the_one_window, 0 },
+        { "stop_all_keeps_unsaved_work", t_stop_all_keeps_unsaved_work, 0 },
+        { "idle_server_exits", t_idle_server_exits, 0 },
+        { "quitting_discards_unsaved_edits", t_quitting_discards_unsaved_edits, 0 },
+        { "idle_server_with_unsaved_edits_exits_too", t_idle_server_with_unsaved_edits_exits_too, 0 },
     };
     return run_tests(tests, sizeof tests / sizeof *tests) ? 1 : 0;
 }
