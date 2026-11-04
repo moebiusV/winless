@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "testlib.h"
 #include <signal.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -494,6 +495,127 @@ static void t_overwriting_someone_elses_change_is_recoverable(void) {
     check_disk(f, "someone else's edit\n");
 }
 
+/* ---- annotations ---- */
+static jv *annotation_list(int deleted) {
+    char body[80]; snprintf(body, sizeof body, "{\"cmd\":\"annotations\"%s}", deleted ? ",\"deleted\":true" : "");
+    return post_json("/cmd", body);
+}
+static const jv *find_note(const jv *list, const char *note) {         /* the item with this note text */
+    const jv *items = json_get(list, "items");
+    for (size_t i = 0; items && i < items->n; i++) if (!strcmp(json_gets(items->items[i], "note", NULL), note)) return items->items[i];
+    return NULL;
+}
+
+static void t_annotations_by_scope(void) {
+    char *f = tmp_write("ann.txt", "alpha beta\n\ngamma delta\nepsilon\n", 31);
+    expect_ok(CLI("open", f, "--no-window"));
+    run_t r = CLI("annotations"); CHECK_CONTAINS(r.out, "no notes"); free(r.out);
+
+    expect_ok(CLI("annotate", "1", "7", "1", "11", "about beta"));            /* inside one paragraph: the text is kept */
+    expect_ok(CLI("annotate", "3", "1", "5", "1", "two paragraphs"));         /* rows 3 and 4 (an end at the start of row 5 does not reach row 5) */
+    expect_ok(CLI("annotate", "--file", "the whole thing"));
+    expect_ok(CLI("annotate", "1", "1", "5", "1", "all of it, selected"));    /* everything selected counts as the file */
+    expect_ok(CLI("annotate", "4", "2", "4", "5", "multi\xC3\xA9 byte"));      /* columns count code points */
+
+    jv *l = annotation_list(0);
+    const jv *n1 = find_note(l, "about beta");
+    CHECK(n1 != NULL); CHECK_STR(json_gets(n1, "scope", NULL), "text"); CHECK_STR(json_gets(n1, "text", NULL), "beta");
+    CHECK_INT(json_getnum(n1, "r1", 0), 1); CHECK_INT(json_getnum(n1, "c1", 0), 7); CHECK_INT(json_getnum(n1, "r2", 0), 1); CHECK_INT(json_getnum(n1, "c2", 0), 11);
+    CHECK_STR(json_gets(n1, "file", NULL), f);                                  /* the file's real path */
+    CHECK(strlen(json_gets(n1, "created", NULL)) == 20 && json_gets(n1, "created", NULL)[10] == 'T');
+    const jv *n2 = find_note(l, "two paragraphs");
+    CHECK(n2 != NULL); CHECK_STR(json_gets(n2, "scope", NULL), "paragraphs"); CHECK_STR(json_gets(n2, "paragraphs", NULL), "3-4");
+    CHECK(json_get(n2, "text")->t == J_NULL);                                  /* more than a paragraph: no text kept */
+    const jv *n3 = find_note(l, "the whole thing");
+    CHECK(n3 != NULL); CHECK_STR(json_gets(n3, "scope", NULL), "file"); CHECK(json_get(n3, "r1")->t == J_NULL);
+    const jv *n4 = find_note(l, "all of it, selected");
+    CHECK(n4 != NULL); CHECK_STR(json_gets(n4, "scope", NULL), "file");
+    const jv *n5 = find_note(l, "multi\xC3\xA9 byte"); CHECK(n5 != NULL); CHECK_STR(json_gets(n5, "text", NULL), "psi");
+    json_free(l);
+
+    r = CLI("annotate", "1", "1", "1", "1", "empty selection"); CHECK_INT(r.code, 1); free(r.out);     /* nothing selected */
+    r = CLI("annotate", "9", "1", "9", "5", "off the end"); CHECK_INT(r.code, 1); free(r.out);
+    r = CLI("annotate", "1", "1", "1", "5", ""); CHECK_INT(r.code, 1); free(r.out);                      /* an empty note */
+
+    jv *c = get_json("/content");                                               /* the page gets the notes with the text */
+    const jv *an = json_get(c, "annotations"); CHECK(an != NULL && an->t == J_ARR && an->n == 5); json_free(c);
+
+    long id = (long)json_getnum(find_note((l = annotation_list(0)), "about beta"), "id", 0); json_free(l);
+    char ids[24]; snprintf(ids, sizeof ids, "%ld", id);
+    expect_ok(CLI("unannotate", ids));                                          /* hidden, not deleted ... */
+    l = annotation_list(0); CHECK(find_note(l, "about beta") == NULL); json_free(l);
+    l = annotation_list(1); CHECK(find_note(l, "about beta") != NULL); json_free(l);
+    expect_ok(CLI("unannotate", "--restore", ids));                             /* ... and it comes back */
+    l = annotation_list(0); CHECK(find_note(l, "about beta") != NULL); json_free(l);
+    r = CLI("unannotate", "999999"); CHECK_INT(r.code, 1); free(r.out);
+}
+
+/* ---- filters ---- */
+static jv *filter_json(long r1, long c1, long r2, long c2, const char *command, int lines, double timeout) {
+    sb_t b; sb_init(&b);
+    sb_printf(&b, "{\"cmd\":\"filter\",\"r1\":%ld,\"c1\":%ld,\"r2\":%ld,\"c2\":%ld,\"linewise\":%s,\"timeout\":%g,\"command\":", r1, c1, r2, c2, lines ? "true" : "false", timeout);
+    json_put_string(&b, command, strlen(command)); sb_putc(&b, '}');
+    jv *j = post_json("/cmd", b.s); sb_free(&b); return j;
+}
+
+static void t_filters(void) {
+    char *f = tmp_write("filt.txt", "banana\napple\ncherry\nna\xC3\xAFve\n", 27);
+    expect_ok(CLI("open", f, "--no-window"));
+    expect_ok(CLI("filter", "1", "1", "4", "1", "--lines", "sort"));          /* whole lines through sort */
+    char *t = content_text(); CHECK_STR(t, "apple\nbanana\ncherry\nna\xC3\xAFve\n"); free(t);
+    expect_ok(CLI("undo")); t = content_text(); CHECK_STR(t, "banana\napple\ncherry\nna\xC3\xAFve\n"); free(t);   /* one step undoes it */
+
+    expect_ok(CLI("filter", "1", "1", "1", "7", "tr a-z A-Z"));               /* exactly the characters in the range */
+    t = content_text(); CHECK_STR(t, "BANANA\napple\ncherry\nna\xC3\xAFve\n"); free(t);
+    expect_ok(CLI("undo"));
+    expect_ok(CLI("filter", "4", "1", "4", "6", "cat"));                      /* multibyte text passes through unharmed (and nothing changes) */
+    t = content_text(); CHECK_STR(t, "banana\napple\ncherry\nna\xC3\xAFve\n"); free(t);
+    CHECK_INT(content_dirty(), 0);
+
+    jv *j = filter_json(2, 1, 3, 1, "printf apple-without-newline", 1, 10);   /* whole lines stay whole lines: a newline is added */
+    CHECK_INT(json_getbool(j, "ok", 0), 1); json_free(j);
+    t = content_text(); CHECK_STR(t, "banana\napple-without-newline\ncherry\nna\xC3\xAFve\n"); free(t);
+    expect_ok(CLI("undo"));
+
+    j = filter_json(1, 1, 2, 1, "echo oops >&2; exit 3", 1, 10);              /* a failing command changes nothing and says why */
+    CHECK_INT(json_getbool(j, "ok", 1), 0); CHECK_CONTAINS(json_gets(j, "error", NULL), "exit 3"); CHECK_CONTAINS(json_gets(j, "error", NULL), "oops"); json_free(j);
+    t = content_text(); CHECK_STR(t, "banana\napple\ncherry\nna\xC3\xAFve\n"); free(t);
+    CHECK_INT(content_dirty(), 0);
+
+    j = filter_json(1, 1, 2, 1, "no-such-command-anywhere", 1, 10);           /* a missing command is a failure too */
+    CHECK_INT(json_getbool(j, "ok", 1), 0); json_free(j);
+
+    double t0 = 0; { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); t0 = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9; }
+    j = filter_json(1, 1, 2, 1, "sleep 20", 1, 0.5);                          /* a command that hangs is stopped */
+    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double took = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9 - t0; CHECK(took < 5.0); }
+    CHECK_INT(json_getbool(j, "ok", 1), 0); CHECK_CONTAINS(json_gets(j, "error", NULL), "in time"); json_free(j);
+
+    j = filter_json(1, 1, 1, 1, "pwd", 0, 10);                                /* it runs in the file's directory, and knows which file */
+    CHECK_INT(json_getbool(j, "ok", 0), 1); json_free(j);
+    t = content_text(); { char want[1200]; const char *sl = strrchr(f, '/'); snprintf(want, sizeof want, "%.*s\nbanana\napple\ncherry\nna\xC3\xAFve\n", (int)(sl - f), f); CHECK_STR(t, want); } free(t);
+    expect_ok(CLI("undo"));
+    j = filter_json(1, 1, 1, 1, "printenv WINLESS_FILE", 0, 10); json_free(j);
+    t = content_text(); CHECK_CONTAINS(t, "filt.txt\nbanana"); free(t);
+    expect_ok(CLI("undo"));
+
+    j = filter_json(9, 1, 9, 1, "cat", 0, 10); CHECK_INT(json_getbool(j, "ok", 1), 0); json_free(j);        /* a bad range */
+}
+
+static void t_filters_with_big_input_and_output(void) {
+    sb_t big; sb_init(&big);
+    for (int i = 0; i < 20000; i++) sb_printf(&big, "line number %d of a long file\n", i);        /* about 600 KB */
+    char *f = tmp_write("big.txt", big.s, big.len);
+    expect_ok(CLI("open", f, "--no-window"));
+    jv *j = filter_json(1, 1, 20001, 1, "echo done", 1, 20);                  /* ignores its input: no deadlock while we write it */
+    CHECK_INT(json_getbool(j, "ok", 0), 1); json_free(j);
+    char *t = content_text(); CHECK_STR(t, "done\n"); free(t);
+    expect_ok(CLI("undo"));
+    j = filter_json(1, 1, 20001, 1, "sed p", 1, 20);                           /* input and output both bigger than a pipe buffer */
+    CHECK_INT(json_getbool(j, "ok", 0), 1); json_free(j);
+    t = content_text(); CHECK_INT(strlen(t), big.len * 2); free(t);
+    sb_free(&big);
+}
+
 int main(void) {
     testlib_init();
     static const testcase tests[] = {
@@ -514,6 +636,9 @@ int main(void) {
         { "edit_rejects_bad_ranges_and_changed_files", t_edit_rejects_bad_ranges_and_changed_files, 1 },
         { "write_needs_a_file", t_write_needs_a_file, 1 },
         { "redo", t_redo, 1 },
+        { "annotations_by_scope", t_annotations_by_scope, 1 },
+        { "filters", t_filters, 1 },
+        { "filters_with_big_input_and_output", t_filters_with_big_input_and_output, 1 },
         { "every_write_can_be_reverted", t_every_write_can_be_reverted, 1 },
         { "overwriting_someone_elses_change_is_recoverable", t_overwriting_someone_elses_change_is_recoverable, 1 },
         { "unsaved_changes_are_not_discarded", t_unsaved_changes_are_not_discarded, 1 },

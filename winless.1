@@ -71,6 +71,22 @@ is made in the server's copy of the text (undoable, shown with [+]); the file is
 .B undo
 Undo the last edit.
 .TP
+.B annotate R1 C1 R2 C2 NOTE
+.TQ
+.B annotate \-\-file NOTE
+Add a note on a range (rows and columns from 1, columns in code points, the end excluded, as for
+.BR edit ),
+or on the whole file. See ANNOTATIONS.
+.TP
+.B annotations [\-\-all] [\-\-deleted]
+List the notes on this file (or on every file); \-\-deleted includes hidden ones.
+.TP
+.B unannotate [\-\-restore] ID
+Hide a note, or with \-\-restore bring it back. Nothing is ever removed from the database.
+.TP
+.B filter R1 C1 R2 C2 [\-\-lines] [\-\-timeout S] COMMAND
+Replace the range with the output of a shell command run on it. See FILTERS.
+.TP
 .B history
 List the earlier versions of the file that writes have kept, oldest first.
 .TP
@@ -90,6 +106,38 @@ Fill the bottom panel (opened by c, i, a, o ...) with TEXT, and with \-\-commit 
 .B write [\-f]
 Write the text to the file it was opened from, atomically (a temporary file in the same directory, then a rename).
 It refuses when the file has changed on disk since it was opened; \-f overwrites anyway.
+.SH ANNOTATIONS
+In visual mode
+.B n
+opens the bottom panel for a note on the selection (Ctrl-Enter saves, Esc cancels).
+Notes are kept in a SQLite database, ~/.local/share/winless/winless.db, one row each: the file, the date and time (UTC), the row and
+column where the text begins and ends, what it covers, the selected text, and the note. A selection inside one paragraph (one line)
+is stored with its text (scope
+.BR text );
+a selection over several paragraphs stores only which paragraphs (scope
+.BR paragraphs ,
+for example 3-4); a selection of everything, or
+.B :annotate TEXT
+or
+.BR "annotate \-\-file" ,
+is a note on the whole file (scope
+.BR file ,
+no position). Notes on text are underlined where they were made, as long as the text there is still what was selected;
+notes on paragraphs put a mark in the margin.
+.B :annotations
+lists them, ]a and [a jump to the next and previous (wrapping around), and
+.B :unannotate N
+hides one (:unannotate! N brings it back). Notes are never deleted.
+.SH FILTERS
+.B :range!command
+replaces the range with the output of the shell command, run on that text, in the directory of the file (the file's path is in
+$WINLESS_FILE). It is one undo step, and if the command fails (a non-zero exit, or longer than 30 seconds) nothing changes and the
+error is shown. Ranges: % . $ N,M and \(aq<,\(aq> (the selected lines, as in vim); \(aq<> is exactly the selection, to the character.
+In visual mode ! offers :\(aq<,\(aq>! (line selection) or :\(aq<>! (character selection); !! offers :.! for the current line. A filter
+needs a range, so a mistyped :!command cannot overwrite anything.
+.PP
+Because a filter runs shell commands, the server only answers requests from pages on this machine: a request with a Host or Origin
+that is not localhost or 127.0.0.1 on its own port (another website, or a rebound hostname) is refused.
 .SH REVERTING
 Every write keeps what it is about to replace, in ~/.local/share/winless/history/ (one directory per file, one numbered snapshot per
 write). A write whose old content is identical to the new writes nothing extra, and if the old content cannot be kept the write is

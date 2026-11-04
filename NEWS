@@ -1,6 +1,14 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Annotations: `n` in visual mode saves a note on the selection in a SQLite database (file, time, begin and end row and column,
+  the selected text, the note; several paragraphs store which ones, a whole-file note says so); notes are underlined or marked in the
+  margin, listed with :annotations, visited with ]a / [a, hidden with :unannotate (never deleted).  Commands: annotate, annotations,
+  unannotate.  Needs libsqlite3.
+  Filters: :range!cmd, visual !, !! replace text with the output of a shell command (one undo step; nothing changes if it fails);
+  '<> is exactly the selection.  Command: filter.
+  The server refuses requests whose Host or Origin is not this machine's, so another website cannot make it edit, write or run a filter.
+  Quitting a window now reaches the server again (a beacon, not a request that the closing window cancels).
   Every write keeps the old file (~/.local/share/winless/history) so any change can be reverted: `history`, `revert [N]`, and :history /
   :revert in the window.  A revert is itself a write, so it can be reverted; a write that cannot keep a copy is refused.
   One server per window: every `open` starts its own server on a port chosen at launch, so opening a window never changes another.

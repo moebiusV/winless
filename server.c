@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_BODY (256UL * 1024 * 1024)
@@ -59,6 +60,7 @@ static size_t nconns, capconns;
 static volatile sig_atomic_t g_stop;
 
 static void on_term(int sig) { (void)sig; g_stop = 1; }
+static int g_listen_port;           /* for checking the Host and Origin of requests */
 static double g_idle_secs;          /* > 0 for a server made for one window: it ends with that window */
 static double g_quit_at;            /* when the window said quit (:q!, :wq, q), the time the server ends */
 
@@ -147,7 +149,7 @@ static void flush_conn(conn *c) {
 }
 
 static void respond(conn *c, int code, const char *ctype, const char *body, size_t len) {
-    const char *reason = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 404 ? "Not Found" : "Internal Server Error";
+    const char *reason = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Internal Server Error";
     sb_printf(&c->out, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
               code, reason, ctype, len);
     sb_put(&c->out, body, len);
@@ -196,7 +198,10 @@ static void h_content(conn *c) {
         sb_puts(&b, "{\"pattern\":"); json_put_string(&b, H.hls[i].pattern, strlen(H.hls[i].pattern));
         sb_puts(&b, ",\"color\":"); put_opt_string(&b, H.hls[i].color); sb_putc(&b, '}');
     }
-    sb_puts(&b, "],\"search\":"); put_opt_string(&b, H.search);
+    sb_puts(&b, "],\"annotations\":");
+    { sb_t an; sb_init(&an); const char *e = H.path ? store_list_json(&an, H.path, 0) : "none";
+      if (e) sb_puts(&b, "[]"); else sb_put(&b, an.s, an.len); sb_free(&an); }          /* a database problem must not break the page */
+    sb_puts(&b, ",\"search\":"); put_opt_string(&b, H.search);
     sb_printf(&b, ",\"top\":%ld}", H.top);
     respond_json(c, &b);
 }
@@ -385,18 +390,144 @@ static const char *do_write(int force) {
     return err;
 }
 
+static const char *apply_edit(long r1, long c1, long r2, long c2, const char *tx, size_t tl) {
+    size_t nl, rl; char *removed;
+    char *nt = tx ? edit_replace(H.text, H.textlen, r1, c1, r2, c2, tx, tl, &nl, &removed, &rl) : NULL;
+    if (!nt) return tx ? "range out of bounds" : "no text given";
+    long er, ec; edit_endpos(r1, c1, tx, tl, &er, &ec);
+    stack_push(&undo_stack, &nundo, &capundo, (undo_t){ r1, c1, er, ec, removed, rl });
+    redo_clear();
+    free(H.text); H.text = nt; H.textlen = nl;
+    text_changed();
+    return NULL;
+}
+
+/* Run `sh -c cmd` with `in` on its standard input, collecting its output; in the file's directory.  The server waits for it (one window,
+ * one server), but never longer than `timeout` seconds.  Returns NULL, or a message; *status is the exit status. */
+static const char *run_filter(const char *cmd, const char *cwd, const char *in, size_t inlen, double timeout, sb_t *out, sb_t *errtxt, int *status) {
+    int pin[2], pout[2], perr[2];
+    if (pipe(pin) < 0) return "cannot start the command";
+    if (pipe(pout) < 0) { close(pin[0]); close(pin[1]); return "cannot start the command"; }
+    if (pipe(perr) < 0) { close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]); return "cannot start the command"; }
+    pid_t pid = fork();
+    if (pid < 0) { close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]); close(perr[0]); close(perr[1]); return "cannot start the command"; }
+    if (pid == 0) {
+        dup2(pin[0], 0); dup2(pout[1], 1); dup2(perr[1], 2);
+        for (int fd = 3; fd < 1024; fd++) close(fd);                  /* not the listening socket, not the clients */
+        if (cwd && *cwd && chdir(cwd) != 0) { /* run where we are */ }
+        if (H.path) setenv("WINLESS_FILE", H.path, 1);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    close(pin[0]); close(pout[1]); close(perr[1]);
+    int fi = pin[1], fo = pout[0], fe = perr[0];
+    fcntl(fi, F_SETFL, fcntl(fi, F_GETFL) | O_NONBLOCK); fcntl(fo, F_SETFL, fcntl(fo, F_GETFL) | O_NONBLOCK); fcntl(fe, F_SETFL, fcntl(fe, F_GETFL) | O_NONBLOCK);
+    size_t done = 0; const size_t maxout = 64UL * 1024 * 1024;
+    double deadline = now_monotonic() + timeout; const char *err = NULL;
+    if (inlen == 0) { close(fi); fi = -1; }
+    while (fo >= 0 || fe >= 0) {
+        struct pollfd pf[3]; int n = 0, io = -1, ie = -1, ii = -1;
+        if (fi >= 0) { pf[n].fd = fi; pf[n].events = POLLOUT; ii = n++; }
+        if (fo >= 0) { pf[n].fd = fo; pf[n].events = POLLIN; io = n++; }
+        if (fe >= 0) { pf[n].fd = fe; pf[n].events = POLLIN; ie = n++; }
+        double left = deadline - now_monotonic();
+        if (left <= 0) { err = "the command did not finish in time and was stopped"; break; }
+        int rc = poll(pf, (nfds_t)n, (int)(left * 1000) + 1);
+        if (rc < 0 && errno != EINTR) { err = "cannot wait for the command"; break; }
+        if (ii >= 0 && (pf[ii].revents & (POLLOUT | POLLERR | POLLHUP))) {
+            ssize_t w = write(fi, in + done, inlen - done);
+            if (w > 0) done += (size_t)w;
+            if ((w < 0 && errno != EAGAIN && errno != EINTR) || done >= inlen) { close(fi); fi = -1; }     /* a command that ignores its input is fine */
+        }
+        char buf[65536];
+        if (io >= 0 && (pf[io].revents & (POLLIN | POLLHUP | POLLERR))) {
+            ssize_t k = read(fo, buf, sizeof buf);
+            if (k > 0) { if (out->len + (size_t)k > maxout) { err = "the command produced too much output"; break; } sb_put(out, buf, (size_t)k); }
+            else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { close(fo); fo = -1; }
+        }
+        if (ie >= 0 && (pf[ie].revents & (POLLIN | POLLHUP | POLLERR))) {
+            ssize_t k = read(fe, buf, sizeof buf);
+            if (k > 0) { if (errtxt->len < 2000) sb_put(errtxt, buf, (size_t)k); }
+            else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { close(fe); fe = -1; }
+        }
+    }
+    if (fi >= 0) close(fi);
+    if (fo >= 0) close(fo);
+    if (fe >= 0) close(fe);
+    if (err) kill(pid, SIGKILL);
+    int st = 0; while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    *status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    return err;
+}
+
+/* filter: replace a range with the output of a shell command run on that range -- one undoable edit, and only if the command succeeds. */
+static void filter_command(const jv *v, sb_t *r) {
+    const char *cmd = json_gets(v, "command", NULL);
+    if (!cmd || !*cmd) { put_result(r, "no command given"); return; }
+    long r1 = (long)json_getnum(v, "r1", 0), c1 = (long)json_getnum(v, "c1", 0), r2 = (long)json_getnum(v, "r2", 0), c2 = (long)json_getnum(v, "c2", 0);
+    size_t a = edit_offset(H.text, H.textlen, r1, c1), b = edit_offset(H.text, H.textlen, r2, c2);
+    if (a == (size_t)-1 || b == (size_t)-1 || a > b) { put_result(r, "range out of bounds"); return; }
+    char *cwd = NULL;
+    if (H.path) { char *sl = strrchr(H.path, '/'); if (sl && sl != H.path) cwd = xstrndup(H.path, (size_t)(sl - H.path)); }
+    sb_t out, er; sb_init(&out); sb_init(&er); int status = 0;
+    double timeout = json_getnum(v, "timeout", 30); if (timeout < 0.1) timeout = 30;
+    const char *err = run_filter(cmd, cwd, H.text + a, b - a, timeout, &out, &er, &status);
+    free(cwd);
+    if (!err && status != 0) {
+        while (er.len && (er.s[er.len - 1] == '\n' || er.s[er.len - 1] == '\r')) er.s[--er.len] = 0;
+        sb_t msg; sb_init(&msg); sb_printf(&msg, "the command failed (exit %d)%s%.300s", status, er.len ? ": " : "", er.s);
+        put_result(r, msg.s); sb_free(&msg); sb_free(&out); sb_free(&er); return;           /* the text is untouched */
+    }
+    if (err) { put_result(r, err); sb_free(&out); sb_free(&er); return; }
+    if (json_getbool(v, "linewise", 0) && out.len && out.s[out.len - 1] != '\n') sb_putc(&out, '\n');     /* whole lines stay whole lines */
+    if (out.len == b - a && memcmp(out.s, H.text + a, out.len) == 0) put_result(r, NULL);                  /* nothing changed */
+    else put_result(r, apply_edit(r1, c1, r2, c2, out.s, out.len));
+    sb_free(&out); sb_free(&er);
+}
+
+/* annotate: a note on a range, kept in the database.  Inside one paragraph the selected text is kept; over several paragraphs only
+ * which ones; for the whole file, neither. */
+static void annotate_command(const jv *v, sb_t *r) {
+    if (!H.path) { put_result(r, "no file: the text was not opened from a file"); return; }
+    const char *note = json_gets(v, "note", NULL);
+    if (!note || !*note) { put_result(r, "the note is empty"); return; }
+    long id = 0; const char *err, *scope; char paras[48] = ""; char *sel = NULL;
+    long r1 = (long)json_getnum(v, "r1", 0), c1 = (long)json_getnum(v, "c1", 0), r2 = (long)json_getnum(v, "r2", 0), c2 = (long)json_getnum(v, "c2", 0);
+    if (json_getbool(v, "file", 0)) { scope = "file"; r1 = c1 = r2 = c2 = 0; }
+    else {
+        size_t a = edit_offset(H.text, H.textlen, r1, c1), b = edit_offset(H.text, H.textlen, r2, c2);
+        if (a == (size_t)-1 || b == (size_t)-1 || a >= b) { put_result(r, "nothing is selected (or the range is out of bounds)"); return; }
+        size_t end = H.textlen; if (end && H.text[end - 1] == '\n') end--;
+        long last = (c2 == 1 && r2 > r1) ? r2 - 1 : r2;                    /* an end at the start of a row does not reach into that row */
+        if (a == 0 && b >= end) { scope = "file"; r1 = c1 = r2 = c2 = 0; }
+        else if (last == r1) { scope = "text"; size_t bl = b - a; if (bl && H.text[a + bl - 1] == '\n') bl--; sel = xstrndup(H.text + a, bl); }
+        else { scope = "paragraphs"; snprintf(paras, sizeof paras, "%ld-%ld", r1, last); }
+    }
+    err = store_add(H.path, r1, c1, r2, c2, scope, sel, paras[0] ? paras : NULL, note, &id);
+    free(sel);
+    if (err) { put_result(r, err); return; }
+    const char *m = "{\"cmd\":\"reload\"}"; broadcast(m, strlen(m));        /* pages redraw their annotations */
+    sb_printf(r, "{\"ok\":true,\"id\":%ld,\"scope\":\"%s\"}", id, scope);
+}
+
 static void edit_command(const char *cmd, const jv *v, sb_t *r) {
     if (!strcmp(cmd, "edit")) {
         size_t tl = 0; const char *tx = json_gets(v, "text", &tl);
-        long r1 = (long)json_getnum(v, "r1", 0), c1 = (long)json_getnum(v, "c1", 0), r2 = (long)json_getnum(v, "r2", 0), c2 = (long)json_getnum(v, "c2", 0);
-        size_t nl, rl; char *removed;
-        char *nt = tx ? edit_replace(H.text, H.textlen, r1, c1, r2, c2, tx, tl, &nl, &removed, &rl) : NULL;
-        if (!nt) { put_result(r, tx ? "range out of bounds" : "no text given"); return; }
-        long er, ec; edit_endpos(r1, c1, tx, tl, &er, &ec);
-        stack_push(&undo_stack, &nundo, &capundo, (undo_t){ r1, c1, er, ec, removed, rl });
-        redo_clear();
-        free(H.text); H.text = nt; H.textlen = nl;
-        text_changed(); put_result(r, NULL);
+        put_result(r, apply_edit((long)json_getnum(v, "r1", 0), (long)json_getnum(v, "c1", 0), (long)json_getnum(v, "r2", 0), (long)json_getnum(v, "c2", 0), tx, tl));
+    } else if (!strcmp(cmd, "filter")) {
+        filter_command(v, r);
+    } else if (!strcmp(cmd, "annotate")) {
+        annotate_command(v, r);
+    } else if (!strcmp(cmd, "annotations")) {
+        if (!H.path && !json_getbool(v, "all", 0)) { put_result(r, "no file: the text was not opened from a file"); return; }
+        sb_t an; sb_init(&an);
+        const char *e = store_list_json(&an, json_getbool(v, "all", 0) ? NULL : H.path, json_getbool(v, "deleted", 0));
+        if (e) put_result(r, e); else { sb_puts(r, "{\"ok\":true,\"items\":"); sb_put(r, an.s, an.len); sb_putc(r, '}'); }
+        sb_free(&an);
+    } else if (!strcmp(cmd, "unannotate")) {
+        const char *e = store_set_deleted((long)json_getnum(v, "id", 0), !json_getbool(v, "restore", 0));
+        if (!e) { const char *m = "{\"cmd\":\"reload\"}"; broadcast(m, strlen(m)); }
+        put_result(r, e);
     } else if (!strcmp(cmd, "undo")) {
         if (!nundo) { put_result(r, "nothing to undo"); return; }
         undo_t u = undo_stack[nundo - 1];
@@ -454,7 +585,8 @@ static void h_cmd(conn *c, const char *body, size_t blen) {
         json_put_string(&res, msg.s, msg.len); sb_free(&msg);
         sb_putc(&res, '}'); json_free(v); respond_json(c, &res); return;
     }
-    if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "history") || !strcmp(cmd, "revert")) {
+    if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "history") || !strcmp(cmd, "revert")
+        || !strcmp(cmd, "filter") || !strcmp(cmd, "annotate") || !strcmp(cmd, "annotations") || !strcmp(cmd, "unannotate")) {
         sb_t res; sb_init(&res); edit_command(cmd, v, &res); json_free(v); respond_json(c, &res); return;
     }
     int stop = 0, bcast = 1;
@@ -518,6 +650,24 @@ static void handle_request(conn *c, const char *method, const char *path, const 
     else respond_err(c, 404, "not found");
 }
 
+/* Only this machine's own pages may talk to the server: a web page from anywhere else (or a hostname rebound to 127.0.0.1) must not be
+ * able to edit, write or run a filter.  Browsers always send Host, and Origin on cross-origin and POST requests. */
+static int local_name_ok(const char *h, int with_scheme) {
+    if (with_scheme) { if (strncasecmp(h, "http://", 7) != 0) return 0; h += 7; }
+    size_t n;
+    if (*h == '[') { const char *e = strchr(h, ']'); if (!e) return 0; n = (size_t)(e - h) + 1; }
+    else { const char *e = strchr(h, ':'); n = e ? (size_t)(e - h) : strlen(h); }
+    int ok = (n == 9 && !strncasecmp(h, "localhost", 9)) || (n == 9 && !strncmp(h, "127.0.0.1", 9)) || (n == 5 && !strncmp(h, "[::1]", 5));
+    if (!ok) return 0;
+    if (h[n] == ':') { char *end; long p = strtol(h + n + 1, &end, 10); return *end == 0 && p == g_listen_port; }
+    return h[n] == 0;
+}
+static int request_allowed(const char *host, const char *origin) {
+    if (host && !local_name_ok(host, 0)) return 0;
+    if (origin && !local_name_ok(origin, 1)) return 0;
+    return 1;
+}
+
 /* Try to parse one complete request out of c->in. */
 static void try_request(conn *c) {
     char *hdr_end = strstr(c->in.s, "\r\n\r\n");
@@ -526,12 +676,19 @@ static void try_request(conn *c) {
     char *line_end = strstr(c->in.s, "\r\n");
     char method[16] = "", path[2048] = "";
     if (sscanf(c->in.s, "%15s %2047s", method, path) != 2 || !line_end) { respond_err(c, 400, "bad request"); return; }
-    size_t clen = 0;
+    size_t clen = 0; char host[200] = "", origin[200] = ""; int have_host = 0, have_origin = 0;
     for (char *p = line_end + 2; p < hdr_end + 2;) {
         char *e = strstr(p, "\r\n"); if (!e) break;
         if (!strncasecmp(p, "content-length:", 15)) { unsigned long long v = strtoull(p + 15, NULL, 10); if (v > MAX_BODY) { respond_err(c, 400, "body too large"); return; } clen = (size_t)v; }
+        else if (!strncasecmp(p, "host:", 5) || !strncasecmp(p, "origin:", 7)) {
+            int is_host = !strncasecmp(p, "host:", 5); char *val = p + (is_host ? 5 : 7);
+            while (val < e && (*val == ' ' || *val == '\t')) val++;
+            size_t vl = (size_t)(e - val); char *dst = is_host ? host : origin; if (vl >= 200) vl = 199;
+            memcpy(dst, val, vl); dst[vl] = 0; if (is_host) have_host = 1; else have_origin = 1;
+        }
         p = e + 2;
     }
+    if (!request_allowed(have_host ? host : NULL, have_origin ? origin : NULL)) { respond_err(c, 403, "forbidden: only pages from this machine may use this server"); return; }
     if (c->in.len < head_len + clen) return;                  /* body not complete yet */
     handle_request(c, method, path, c->in.s + head_len, clen);
 }
@@ -569,7 +726,7 @@ int server_run(int port, double idle_secs) {
     if (ls < 0) { fprintf(stderr, "winless: cannot listen on 127.0.0.1:%d: %s\n", port, strerror(errno)); return 1; }
     printf("winless %s serving on http://127.0.0.1:%d/\n", PACKAGE_VERSION, port); fflush(stdout);
     registry_add(port);
-    g_idle_secs = idle_secs;
+    g_idle_secs = idle_secs; g_listen_port = port;
     double last_busy = now_monotonic();                             /* for idle_secs: the last time a window was connected or edits were unsaved */
 
     while (!g_stop) {

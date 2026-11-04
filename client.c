@@ -221,6 +221,8 @@ static void usage(FILE *f) {
           "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop]\n"
           "  status [--json] [--text]     wait [--timeout S]     window [--windowed]   close\n"
           "  history | revert [N]    (every write keeps the old file; revert puts one back)\n"
+          "  annotate R1 C1 R2 C2 NOTE | --file NOTE    annotations [--all]    unannotate [--restore] ID\n"
+          "  filter R1 C1 R2 C2 [--lines] COMMAND       (replace a range with the output of a shell command)\n"
           "  windows   (list the open windows)    stop [--all] [--force]    serve | start      --version   --help\n"
           "Each open starts its own server and window; with several open, commands ask which (or use --port N).\n"
           "See winless(1).\n", f);
@@ -461,6 +463,79 @@ static int cmd_history(int port) {
     return 0;
 }
 
+/* ---- annotations and filters (the work is done by the server; these are the command-line doors to it) ---- */
+static jv *ask(int port, sb_t *b, const char *what) {         /* send a command, parse the reply, print its error; NULL on failure */
+    char *resp = NULL;
+    if (send_cmd(port, b, &resp)) return NULL;
+    jv *j = json_parse(resp ? resp : "", resp ? strlen(resp) : 0); free(resp);
+    if (!j || !json_getbool(j, "ok", 0)) { const char *e = j ? json_gets(j, "error", NULL) : NULL; fprintf(stderr, "winless %s: %s\n", what, e ? e : "failed"); json_free(j); return NULL; }
+    return j;
+}
+/* annotate R1 C1 R2 C2 NOTE   (rows and columns from 1, the end excluded -- as for edit)      annotate --file NOTE   (the whole file) */
+static int cmd_annotate(int port, int argc, char **argv) {
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"annotate\"");
+    const char *note;
+    if (argc == 2 && !strcmp(argv[0], "--file")) { sb_puts(&b, ",\"file\":true"); note = argv[1]; }
+    else if (argc == 5) {
+        const char *names[4] = { "r1", "c1", "r2", "c2" };
+        for (int i = 0; i < 4; i++) { jkey(&b, names[i]); json_put_number(&b, atof(argv[i])); }
+        note = argv[4];
+    } else { sb_free(&b); fprintf(stderr, "usage: winless annotate R1 C1 R2 C2 NOTE | annotate --file NOTE\n"); return 2; }
+    sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, note, strlen(note));
+    jopt(&b, "note", clean.s); sb_free(&clean); sb_putc(&b, '}');
+    jv *j = ask(port, &b, "annotate"); if (!j) return 1;
+    printf("note %.0f saved (%s)\n", json_getnum(j, "id", 0), json_gets(j, "scope", NULL)); json_free(j);
+    return 0;
+}
+/* annotations [--all] [--deleted]: the notes on this file (or on every file) */
+static int cmd_annotations(int port, int argc, char **argv) {
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"annotations\"");
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--all")) sb_puts(&b, ",\"all\":true"); else if (!strcmp(argv[i], "--deleted")) sb_puts(&b, ",\"deleted\":true");
+        else { sb_free(&b); fprintf(stderr, "usage: winless annotations [--all] [--deleted]\n"); return 2; }
+    }
+    sb_putc(&b, '}');
+    jv *j = ask(port, &b, "annotations"); if (!j) return 1;
+    const jv *items = json_get(j, "items");
+    if (!items || items->n == 0) puts("no notes");
+    else for (size_t i = 0; i < items->n; i++) {
+        const jv *it = items->items[i]; const char *scope = json_gets(it, "scope", NULL), *note = json_gets(it, "note", NULL), *text = json_gets(it, "text", NULL), *paras = json_gets(it, "paragraphs", NULL);
+        char where[80];
+        if (scope && !strcmp(scope, "text")) snprintf(where, sizeof where, "%.0f:%.0f-%.0f:%.0f", json_getnum(it, "r1", 0), json_getnum(it, "c1", 0), json_getnum(it, "r2", 0), json_getnum(it, "c2", 0));
+        else if (scope && !strcmp(scope, "paragraphs")) snprintf(where, sizeof where, "paragraphs %s", paras ? paras : "?");
+        else snprintf(where, sizeof where, "whole file");
+        printf("#%.0f  %s%s  %s  %s\n", json_getnum(it, "id", 0), json_getbool(it, "deleted", 0) ? "[hidden] " : "", json_gets(it, "created", NULL), where, note ? note : "");
+        if (text) printf("      on: %s\n", text);
+    }
+    json_free(j);
+    return 0;
+}
+/* unannotate [--restore] ID: hide a note (nothing is deleted from the database), or bring it back */
+static int cmd_unannotate(int port, int argc, char **argv) {
+    int restore = argc > 0 && !strcmp(argv[0], "--restore");
+    if (argc != 1 + restore || !is_num(argv[restore])) { fprintf(stderr, "usage: winless unannotate [--restore] ID\n"); return 2; }
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"unannotate\""); jkey(&b, "id"); json_put_number(&b, atof(argv[restore])); if (restore) sb_puts(&b, ",\"restore\":true"); sb_putc(&b, '}');
+    jv *j = ask(port, &b, "unannotate"); if (!j) return 1; json_free(j);
+    return 0;
+}
+/* filter R1 C1 R2 C2 [--lines] [--timeout S] COMMAND: replace the range with the output of a shell command run on it (one undoable edit) */
+static int cmd_filter(int port, int argc, char **argv) {
+    if (argc < 5) { fprintf(stderr, "usage: winless filter R1 C1 R2 C2 [--lines] [--timeout S] COMMAND\n"); return 2; }
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"filter\"");
+    const char *names[4] = { "r1", "c1", "r2", "c2" };
+    for (int i = 0; i < 4; i++) { jkey(&b, names[i]); json_put_number(&b, atof(argv[i])); }
+    int i = 4;
+    for (; i < argc - 1; i++) {
+        if (!strcmp(argv[i], "--lines")) sb_puts(&b, ",\"linewise\":true");
+        else if (!strcmp(argv[i], "--timeout") && i + 1 < argc - 1) { jkey(&b, "timeout"); json_put_number(&b, atof(argv[++i])); }
+        else break;
+    }
+    if (i != argc - 1) { sb_free(&b); fprintf(stderr, "usage: winless filter R1 C1 R2 C2 [--lines] [--timeout S] COMMAND\n"); return 2; }
+    jopt(&b, "command", argv[i]); sb_putc(&b, '}');
+    jv *j = ask(port, &b, "filter"); if (!j) return 1; json_free(j);
+    return 0;
+}
+
 static int cmd_status(int port, int argc, char **argv) {
     int json = 0, text = 0;
     for (int i = 0; i < argc; i++) {
@@ -556,6 +631,10 @@ int client_main(int port, int explicit_port, int argc, char **argv) {
     if (!strcmp(cmd, "open")) return cmd_open(port, explicit_port, ac, av);
     if (!strcmp(cmd, "status")) return cmd_status(port, ac, av);
     if (!strcmp(cmd, "history")) return cmd_history(port);
+    if (!strcmp(cmd, "annotate")) return cmd_annotate(port, ac, av);
+    if (!strcmp(cmd, "annotations")) return cmd_annotations(port, ac, av);
+    if (!strcmp(cmd, "unannotate")) return cmd_unannotate(port, ac, av);
+    if (!strcmp(cmd, "filter")) return cmd_filter(port, ac, av);
     if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "revert")) return cmd_edit(port, cmd, ac, av);
     if (!strcmp(cmd, "wait")) return cmd_wait(port, ac, av);
     if (!strcmp(cmd, "window")) {

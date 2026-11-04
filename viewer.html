@@ -6,9 +6,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
-          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
+          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --ann:#e0b050; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
   :root.light { --bg:#fbfaf6; --fg:#22252a; --dim:#7a7468; --bar:#e8e3d6; --mark:#fff0a8; --hl:#cfe3ff;
-          --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; }
+          --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; --ann:#b07a00; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden; }
   #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
           font:var(--size)/1.38 var(--font); box-sizing:border-box; }
@@ -22,6 +22,8 @@
   .sel { background:var(--sel); }
   .vcur { background:var(--vcur); color:#000; box-shadow:0 2px 0 var(--vcur), 0 -1px 0 var(--vcur); }   /* a steady block, as tall as the row */
   .selrow { background:var(--sel); }
+  .ann { text-decoration:underline dotted var(--ann); text-underline-offset:3px; text-decoration-thickness:2px; }
+  .annrow { box-shadow:inset 3px 0 0 var(--ann); }
   #panel { display:none; position:absolute; left:0; right:0; bottom:var(--barh,28px); background:var(--bar); padding:6px 10px;
            box-sizing:border-box; border-top:1px solid var(--dim); }
   #panel .title { color:var(--dim); font:12px var(--font); height:18px; }
@@ -59,7 +61,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const view = $("view"), measure = $("measure");
-const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, dirty: false, undo: 0, path: null,
+const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, anns: [], dirty: false, undo: 0, path: null,
             search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false };
 let sentTimer = null, closedSent = false;
 
@@ -82,6 +84,8 @@ function lineNode(i) {
   const add = (re, cls) => { re.lastIndex = 0; let m; while ((m = re.exec(text)) && m[0] !== "") { ranges.push([m.index, m.index + m[0].length, cls]); if (re.lastIndex === m.index) re.lastIndex++; } };
   for (const h of S.hls) add(h.re, "hl:" + (h.color || ""));
   if (S.search) add(S.search.re, i === S.curLine ? "cur" : "hit");
+  for (const r of annRangesFor(i)) ranges.push(r);
+  if (annRow(i)) d.classList.add("annrow");
   { const vr = visRangesFor(i), cr = vr.find(r => r[2] === "vcur");       // the cursor block always shows: split other highlights around it
     for (const r of vr) if (r[2] !== "vcur") ranges.push(r);
     if (cr) {
@@ -253,7 +257,11 @@ function runPrompt(ch, v) {
   if (ch === "/") { if (S.vis) visSearch(v); else doSearch(v, false); } else if (ch === "?") doSearch(v, true);
   else if (ch === ":") {
     v = v.trim(); let m;
+    if ((m = /^([%*.$0-9,'<>]*)!(.+)$/.exec(v))) { filterRange(m[1], m[2]); return; }
     if ((m = /^([%*.$0-9,'<>]*)s([^\w\s\\"|].*)$/.exec(v))) { substitute(m[1], m[2][0], m[2].slice(1)); return; }
+    if (v === "annotations") { showAnnotations(); return; }
+    if ((m = /^annotate\s+(.+)$/.exec(v))) { saveAnnotation({ file: true }, m[1]).then(() => 0); return; }
+    if ((m = /^unannotate(!?)\s+(\d+)$/.exec(v))) { sendCmd({ cmd: "unannotate", id: +m[2], restore: !!m[1] }).then(j => flash(j.ok ? (m[1] ? "note restored" : "note hidden") : j.error)); return; }
     if (v === "q" || v === "quit") tryQuit(false); else if (v === "q!") tryQuit(true);
     else if (v === "w") writeFile(false); else if (v === "w!") writeFile(true);
     else if (v === "history") showHistory(); else if ((m = /^revert(!?)(?:\s+(\d+))?$/.exec(v))) revertFile(m[2] ? +m[2] : 0, !!m[1]);
@@ -518,6 +526,8 @@ function pendingKey(k) {             // g, z and r prefixes in normal mode
     if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); }
     else if (k === "v") reselect();
   } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); }
+  else if (p === "!") { if (k === "!") openPrompt(":", ".!"); }                           // !! filters the current line
+  else if (p === "]" || p === "[") { if (k === "a") nextAnnotation(p === "]" ? 1 : -1); }
   else if (p === "r") {
     const r = S.cur.r, c = S.cur.c, n = takeCount();
     if (k.length === 1 && lcp(r).length > c) { const end = Math.min(c + n - 1, lcp(r).length - 1); doEdit(rangeOf("v", [r, c], [r, end]), k.repeat(end - c + 1)); }
@@ -533,7 +543,7 @@ function normKey(k) {
     case "w": case "b": case "e": case ")": case "(": case "}": case "{": moveBy(k, takeCount()); return true;
     case "G": { const row = gotoRow(0, "G"); setCursor(row, 0); return true; }
     case "j": case "ArrowDown": case "Enter": case "k": case "ArrowUp": moveBy(k, takeCount()); return true;
-    case "g": case "z": case "r": S.pend = k; setMode(); return true;
+    case "g": case "z": case "r": case "!": case "]": case "[": S.pend = k; setMode(); return true;
     case "v": startVisual("v"); return true;
     case "V": startVisual("V"); return true;
     case "y": case "d": case "c": S.op = k; S.opN = takeCount(); setMode(); return true;
@@ -578,8 +588,12 @@ function visKey(k) {
       runOp(k === "x" ? "d" : k, mode, [R.sr, R.sc], [R.er, R.ec]);                    // x deletes the selection, like d
       return true;
     }
-    case "n": return soon("annotating (n)");
-    case "!": return soon("filtering (!)");
+    case "n": {                      // a note on the selection
+      const R = visRange(), mode = v.mode; exitVisual();
+      const rg = rangeOf(mode, [R.sr, R.sc], [R.er, R.ec]);
+      openPanel("note on the selection: Ctrl-Enter saves, Esc cancels", "", txt => saveAnnotation(rg, txt)); return true;
+    }
+    case "!": { const mode = v.mode; exitVisual(); openPrompt(":", mode === "V" ? "'<,'>!" : "'<>!"); return true; }
     case "s": return soon("s (slop review)");
     case "S": return soon("S (fix the selection)");
   }
@@ -713,6 +727,66 @@ async function substitute(rangeStr, delim, body) {
   if (await doEdit(range, out)) flash(count + " substitution" + (count === 1 ? "" : "s"));
 }
 
+/* ---------- annotations and filters ---------- */
+/* Notes live in the database (the server sends this file's notes with the text).  A note on text inside one paragraph is underlined
+   where it was made -- but only while the text there is still what was selected; a note over several paragraphs puts a mark in the
+   margin of those paragraphs; a note on the whole file has no place, and is found with :annotations. */
+function annRangesFor(i) {
+  const out = [];
+  for (const a of S.anns) {
+    if (a.scope !== "text" || a.r1 !== i + 1 || a.r2 !== a.r1 || a.text == null) continue;
+    const cps = lcp(i);
+    if (cps.slice(a.c1 - 1, a.c2 - 1).join("") !== a.text) continue;             // the text has changed since: do not mark the wrong words
+    const u = k => cps.slice(0, k).join("").length;
+    out.push([u(a.c1 - 1), u(a.c2 - 1), "ann"]);
+  }
+  return out;
+}
+function annRow(i) {
+  for (const a of S.anns) {
+    if (a.scope !== "paragraphs" || !a.paragraphs) continue;
+    const m = /^(\d+)-(\d+)$/.exec(a.paragraphs); if (m && i + 1 >= +m[1] && i + 1 <= +m[2]) return true;
+  }
+  return false;
+}
+function annPositions() {            // where the notes are, in reading order: [{ r, c, note }] (rows and columns from 0)
+  const out = [];
+  for (const a of S.anns) {
+    if (a.scope === "text") out.push({ r: a.r1 - 1, c: a.c1 - 1, note: a.note, id: a.id });
+    else if (a.scope === "paragraphs" && a.paragraphs) { const m = /^(\d+)-/.exec(a.paragraphs); if (m) out.push({ r: +m[1] - 1, c: 0, note: a.note, id: a.id }); }
+  }
+  return out.sort((x, y) => x.r - y.r || x.c - y.c || x.id - y.id);
+}
+function nextAnnotation(dir) {       // ]a and [a: the next / previous note, wrapping around
+  const ps = annPositions(); if (!ps.length) { flash("no notes on this file"); return; }
+  const here = [S.cur.r, S.cur.c];
+  let p = dir > 0 ? ps.find(x => cmpPos([x.r, x.c], here) > 0) : [...ps].reverse().find(x => cmpPos([x.r, x.c], here) < 0);
+  if (!p) p = dir > 0 ? ps[0] : ps[ps.length - 1];
+  setCursor(p.r, p.c); flash("#" + p.id + ": " + p.note.split("\n")[0].slice(0, 160));
+}
+async function saveAnnotation(rg, txt) {
+  if (!txt.trim()) return;
+  const j = await sendCmd(rg.file ? { cmd: "annotate", file: true, note: txt } : { cmd: "annotate", r1: rg.r1, c1: rg.c1, r2: rg.r2, c2: rg.c2, note: txt });
+  flash(j.ok ? "note " + j.id + " saved (" + j.scope + ")" : "not saved: " + j.error);
+}
+async function showAnnotations() {
+  const j = await sendCmd({ cmd: "annotations" });
+  if (!j.ok) { flash(j.error); return; }
+  const rows = (j.items || []).map(a => "#" + a.id + "  " + (a.scope === "text" ? a.r1 + ":" + a.c1 : a.scope === "paragraphs" ? "paragraphs " + a.paragraphs : "whole file") + "  " + a.note.split("\n")[0]);
+  openPanel("notes on " + (S.name || "this file") + "  --  ]a [a jump between them; :unannotate N hides one; Esc closes", rows.length ? rows.join("\n") : "(no notes yet: select text and press n)", () => {});
+}
+async function filterRange(rangeStr, command) {   // :range!command -- replace the range with the output of a shell command run on it
+  if (!rangeStr) { flash("a filter needs a range: %!sort  .!fmt  '<,'>!sort  '<>!tr a-z A-Z"); return; }
+  const rg = parseRange(rangeStr); if (rg.error) { flash(rg.error); return; }
+  let range, linewise;
+  if (rg.exact) { range = rangeOf(S.last.mode, S.last.a, S.last.b); linewise = S.last.mode === "V"; }
+  else { range = { r1: rg.rows[0] + 1, c1: 1, r2: rg.rows[1] + 2, c2: 1 }; linewise = true; }
+  S.cur = { r: rg.rows[0], c: 0 };
+  flash("running: " + command);
+  const j = await sendCmd({ cmd: "filter", r1: range.r1, c1: range.c1, r2: range.r2, c2: range.c2, command, linewise });
+  noteResult(j); flash(j.ok ? "filtered" : "filter: " + j.error);
+}
+
 /* the bottom panel: a larger text box for changes */
 function openPanel(title, text, onCommit) {
   S.panel = { onCommit }; $("ptitle").textContent = title; $("ptxt").value = text;
@@ -760,7 +834,8 @@ function toggleNumbers() { S.numbers = !S.numbers; S.off = 0; view.style.setProp
 function toggleWrap() { S.wrap = !S.wrap; S.hx = 0; render(); flash(S.wrap ? "wrap lines" : "chop long lines"); }
 function toggleTheme(v) { const light = v === undefined ? !document.documentElement.classList.contains("light") : v === "light"; document.documentElement.classList.toggle("light", light); render(); }
 function setFont(family, size) { S.off = 0; const r = document.documentElement.style; if (family) r.setProperty("--font", family); if (size) r.setProperty("--size", size + "px"); render(); }
-function quit() { post({ type: "quit" }); closedSent = true; try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winless closed. You can close this window.</div>'; } }, 300); }
+function quit() { try { navigator.sendBeacon("/event", JSON.stringify({ type: "quit" })); } catch (e) { post({ type: "quit" }); } closedSent = true;   // a beacon survives the window closing; an ordinary request would be cancelled
+   try { window.close(); } catch (e) {} setTimeout(() => { if (!window.closed) { document.body.innerHTML = '<div style="padding:30px;font:18px system-ui;color:#999">winless closed. You can close this window.</div>'; } }, 300); }
 const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table>
 <tr><td><b>h j k l</b> &larr;&darr;&uarr;&rarr;</td><td>move the cursor (j and k by screen row); the cursor is always shown as a block</td></tr>
 <tr><td><b>w b e</b> / <b>0 $</b> / <b>( )</b> / <b>{ }</b> / <b>gg G</b></td><td>word / line / sentence / paragraph (a line) / file motions</td></tr>
@@ -780,6 +855,9 @@ const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table
 <tr><td><b>3j 2w 3x 2dd d2w 5G</b></td><td>counts work as in vim</td></tr>
 <tr><td><b>p</b> / <b>u</b> / <b>Ctrl-r</b></td><td>paste after the cursor / undo (half page up when there is nothing to undo) / redo</td></tr>
 <tr><td><b>:s/a/b/g</b> <b>:%s/a/b/</b> <b>:2,5s/a/b/</b></td><td>substitute (JavaScript regex; &amp; and \\1 in the replacement); ranges % . $ N,M; from visual mode <b>:</b> offers '&lt;,'&gt;, and '&lt;&gt; means exactly the selection</td></tr>
+<tr><td><b>n</b> (visual)</td><td>a note on the selection (bottom panel; Ctrl-Enter saves) -- kept in a database; <b>:annotations</b> lists them, <b>]a</b> <b>[a</b> jump between them, <b>:unannotate N</b> hides one, <b>:annotate TEXT</b> is a note on the whole file</td></tr>
+<tr><td><b>!</b> (visual), <b>!!</b>, <b>:%!cmd</b></td><td>replace the selection / the line / a range with the output of a shell command run on it: <b>:'&lt;,'&gt;!sort</b>, <b>:'&lt;&gt;!tr a-z A-Z</b> (exactly the selection), <b>:.!fmt</b>; one undo step; nothing changes if the command fails</td></tr>
+<tr><td><b>:history</b> <b>:revert</b></td><td>the earlier versions of the file that writes kept; put one back</td></tr>
 <tr><td><b>:w</b> <b>:w!</b> <b>:q</b> <b>:q!</b> <b>:wq</b></td><td>write the file (the bar shows [+] while there are unsaved changes)</td></tr></table>
 <p>Press any key to close this help.</p>`;
 function toggleHelp(on) { const h = $("help"); h.innerHTML = HELP; h.style.display = on ? "block" : "none"; }
@@ -825,7 +903,8 @@ function geom() {                   // where things actually are on screen (for 
   const r = id => { const b = $(id).getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
   const c = view.querySelector(".vcur"), cb = c ? c.getBoundingClientRect() : null;
   return { inner: [innerWidth, innerHeight], view: r("view"), bar: r("bar"), panel: r("panel"), panelDisplay: getComputedStyle($("panel")).display,
-           cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null };
+           cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null,
+           anns: S.anns.length, underlined: view.querySelectorAll(".ann").length, marked: view.querySelectorAll(".annrow").length };
 }
 function sendState() {
   post({ type: "state", name: S.name, err: S.err || null, dirty: S.dirty, undo: S.undo, panel: !!S.panel, geom: geom(), vis: S.vis ? { mode: S.vis.mode, ar: S.vis.ar, ac: S.vis.ac } : null, cur: S.cur, op: S.op, off: Math.round(S.off), top: S.top + 1, bottom: S.bottom + 1, total: total(), atEnd: S.atEnd,
@@ -836,7 +915,7 @@ function sendState() {
 }
 async function loadContent(keep = false) {
   const r = await fetch("/content", { cache: "no-store" }); const j = await r.json();
-  S.name = j.name || ""; S.path = j.path || null; S.dirty = !!j.dirty; S.undo = j.undo || 0; S.nl = /\n$/.test(j.text || "\n");
+  S.name = j.name || ""; S.path = j.path || null; S.dirty = !!j.dirty; S.undo = j.undo || 0; S.anns = j.annotations || []; S.nl = /\n$/.test(j.text || "\n");
   S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n"); cpCache.clear();
   if (j.settings) applySettings(j.settings);
   view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());

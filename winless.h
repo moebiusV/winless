@@ -53,6 +53,12 @@ char *edit_replace(const char *text, size_t len, long r1, long c1, long r2, long
                    size_t *outlen, char **removed, size_t *removedlen);    /* new text (caller frees), NULL if the range is invalid */
 void edit_endpos(long r1, long c1, const char *repl, size_t rlen, long *r2, long *c2);   /* where text inserted at (r1,c1) ends */
 
+/* ---- store.c ---- (the annotation database; each returns NULL on success, else an error message) */
+const char *store_add(const char *file, long r1, long c1, long r2, long c2, const char *scope, const char *selected,
+                      const char *paragraphs, const char *note, long *id);      /* r1 == 0: no position (scope "file") */
+const char *store_list_json(sb_t *out, const char *file, int include_deleted);  /* a JSON array; file == NULL: every file */
+const char *store_set_deleted(long id, int deleted);                            /* hide a note, or bring it back */
+
 /* ---- server.c ---- */
 int server_run(int port, double idle_secs);              /* serve until stopped (or, if idle_secs > 0, until no window has been connected and no edits are unsaved for that long) */
 

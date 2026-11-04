@@ -176,7 +176,7 @@ static void t_page_state_is_readable_and_resumes(void) {
 }
 
 static void t_quit_event_releases_a_waiting_request(void) {
-    char path[192]; snprintf(path, sizeof path, "GET /wait?since=%ld&timeout=10 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", status_seq());
+    char path[192]; snprintf(path, sizeof path, "GET /wait?since=%ld&timeout=10 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", status_seq());
     int fd = raw_connect();
     raw_send(fd, path, strlen(path));
     size_t n;
@@ -259,6 +259,37 @@ static void t_stop_command_ends_the_server(void) {
     CHECK(server_exited(5.0));
 }
 
+/* A web page from somewhere else, or a hostname rebound to 127.0.0.1, must not be able to use the server (it can edit, write and run filters). */
+static char *raw_request(const char *method, const char *host, const char *origin, const char *body) {
+    char req[1024];
+    int n = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\n", method, body ? "/cmd" : "/ping");
+    if (host) n += snprintf(req + n, sizeof req - (size_t)n, "Host: %s\r\n", host);
+    if (origin) n += snprintf(req + n, sizeof req - (size_t)n, "Origin: %s\r\n", origin);
+    n += snprintf(req + n, sizeof req - (size_t)n, "Connection: close\r\nContent-Length: %zu\r\n\r\n%s", body ? strlen(body) : 0, body ? body : "");
+    int fd = raw_connect(); raw_send(fd, req, (size_t)n);
+    size_t len; char *reply = raw_read(fd, 5, &len); raw_close(fd);
+    return reply;
+}
+
+static void t_only_local_pages_may_use_the_server(void) {
+    char hostport[40]; snprintf(hostport, sizeof hostport, "localhost:%d", g_port);
+    char origin_ok[60]; snprintf(origin_ok, sizeof origin_ok, "http://127.0.0.1:%d", g_port);
+    char origin_wrongport[60]; snprintf(origin_wrongport, sizeof origin_wrongport, "http://127.0.0.1:%d", g_port + 1);
+    const char *cmd = "{\"cmd\":\"flash\",\"text\":\"x\"}";
+    char *r;
+    r = raw_request("POST", hostport, origin_ok, cmd);            CHECK_CONTAINS(r, "200 OK"); free(r);          /* the page itself */
+    r = raw_request("POST", "127.0.0.1", NULL, cmd);               CHECK_CONTAINS(r, "200 OK"); free(r);          /* the command line */
+    r = raw_request("POST", NULL, NULL, cmd);                      CHECK_CONTAINS(r, "200 OK"); free(r);          /* an old client without Host */
+    r = raw_request("POST", hostport, "http://evil.example", cmd); CHECK_CONTAINS(r, "403"); free(r);             /* another site's page */
+    r = raw_request("POST", hostport, "null", cmd);                CHECK_CONTAINS(r, "403"); free(r);             /* a sandboxed page */
+    r = raw_request("POST", hostport, origin_wrongport, cmd);      CHECK_CONTAINS(r, "403"); free(r);             /* another local service */
+    r = raw_request("POST", "evil.example", NULL, cmd);            CHECK_CONTAINS(r, "403"); free(r);             /* DNS rebinding */
+    r = raw_request("POST", "evil.example:80", origin_ok, cmd);    CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_request("GET", "evil.example", NULL, NULL);            CHECK_CONTAINS(r, "403"); free(r);             /* reads too */
+    r = raw_request("GET", "localhost.evil.example", NULL, NULL);  CHECK_CONTAINS(r, "403"); free(r);             /* a longer name that starts like ours */
+    r = raw_request("GET", "[::1]", NULL, NULL);                   CHECK_CONTAINS(r, "200 OK"); free(r);
+}
+
 int main(void) {
     testlib_init();
     static const testcase tests[] = {
@@ -275,6 +306,7 @@ int main(void) {
         { "search_and_clear_are_remembered", t_search_and_clear_are_remembered, 1 },
         { "page_state_is_readable_and_resumes", t_page_state_is_readable_and_resumes, 1 },
         { "quit_event_releases_a_waiting_request", t_quit_event_releases_a_waiting_request, 1 },
+        { "only_local_pages_may_use_the_server", t_only_local_pages_may_use_the_server, 1 },
         { "wait_times_out", t_wait_times_out, 1 },
         { "closed_event_also_releases_wait", t_closed_event_also_releases_wait, 1 },
         { "disconnected_page_is_dropped_at_once", t_disconnected_page_is_dropped_at_once, 1 },

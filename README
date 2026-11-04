@@ -33,3 +33,7 @@ commands ask which one (or use --port N).
 
 Reverting: every write keeps the file it replaces, so `winless history` lists the earlier versions and `winless revert [N]` puts one
 back (a revert can itself be reverted).  Unsaved edits are never kept: quitting the window discards them, as quitting vim does.
+
+Annotations and filters: in visual mode `n` saves a note on the selection (in ~/.local/share/winless/winless.db; :annotations lists them,
+]a / [a visit them); `:'<,'>!sort`, `:'<>!tr a-z A-Z`, `:%!fmt` replace text with the output of a shell command (one undo step).
+Needs libsqlite3 (libsqlite3-dev).

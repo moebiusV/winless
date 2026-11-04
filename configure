@@ -3567,6 +3567,69 @@ esac
 fi
 
 done
+ac_fn_c_check_header_compile "$LINENO" "sqlite3.h" "ac_cv_header_sqlite3_h" "$ac_includes_default"
+if test "x$ac_cv_header_sqlite3_h" = xyes
+then :
+
+else case e in #(
+  e) as_fn_error $? "sqlite3.h is required (the annotation database): install libsqlite3-dev" "$LINENO" 5 ;;
+esac
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for sqlite3_open_v2 in -lsqlite3" >&5
+printf %s "checking for sqlite3_open_v2 in -lsqlite3... " >&6; }
+if test ${ac_cv_lib_sqlite3_sqlite3_open_v2+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lsqlite3  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char sqlite3_open_v2 (void);
+int
+main (void)
+{
+return sqlite3_open_v2 ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_sqlite3_sqlite3_open_v2=yes
+else case e in #(
+  e) ac_cv_lib_sqlite3_sqlite3_open_v2=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_sqlite3_sqlite3_open_v2" >&5
+printf "%s\n" "$ac_cv_lib_sqlite3_sqlite3_open_v2" >&6; }
+if test "x$ac_cv_lib_sqlite3_sqlite3_open_v2" = xyes
+then :
+  printf "%s\n" "#define HAVE_LIBSQLITE3 1" >>confdefs.h
+
+  LIBS="-lsqlite3 $LIBS"
+
+else case e in #(
+  e) as_fn_error $? "libsqlite3 is required (the annotation database)" "$LINENO" 5 ;;
+esac
+fi
+
 ac_config_files="$ac_config_files Makefile"
 
 cat >confcache <<\_ACEOF
