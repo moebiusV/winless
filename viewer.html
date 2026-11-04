@@ -6,9 +6,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
-          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --ann:#e0b050; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
+          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --ann:#e0b050; --annslop:#e06c75; --annkeep:#7ec07e; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
   :root.light { --bg:#fbfaf6; --fg:#22252a; --dim:#7a7468; --bar:#e8e3d6; --mark:#fff0a8; --hl:#cfe3ff;
-          --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; --ann:#b07a00; }
+          --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; --ann:#b07a00; --annslop:#b3262e; --annkeep:#2e7d32; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden; }
   #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
           font:var(--size)/1.38 var(--font); box-sizing:border-box; }
@@ -23,7 +23,20 @@
   .vcur { background:var(--vcur); color:#000; box-shadow:0 2px 0 var(--vcur), 0 -1px 0 var(--vcur); }   /* a steady block, as tall as the row */
   .selrow { background:var(--sel); }
   .ann { text-decoration:underline dotted var(--ann); text-underline-offset:3px; text-decoration-thickness:2px; }
+  .ann-slop { text-decoration-color:var(--annslop); }
+  .ann-keep { text-decoration-color:var(--annkeep); }
+  .rv-del { background:rgba(224,108,117,.16); }
+  .rv-del::before { content:"\2212  "; color:var(--annslop); font-weight:bold; }
+  .rv-add { background:rgba(126,192,126,.16); }
+  .rv-add::before { content:"+  "; color:var(--annkeep); font-weight:bold; }
+  .rv-accepted.rv-del, .rv-rejected.rv-add { opacity:.4; }
+  .rv-accepted.rv-del { text-decoration:line-through; }
+  .rv-cur { box-shadow:inset 4px 0 0 var(--vcur); }
+  .wd-del { background:rgba(224,108,117,.45); text-decoration:line-through; }
+  .wd-add { background:rgba(126,192,126,.45); }
   .annrow { box-shadow:inset 3px 0 0 var(--ann); }
+  .annrow-slop { box-shadow:inset 3px 0 0 var(--annslop); }
+  .annrow-keep { box-shadow:inset 3px 0 0 var(--annkeep); }
   #panel { display:none; position:absolute; left:0; right:0; bottom:var(--barh,28px); background:var(--bar); padding:6px 10px;
            box-sizing:border-box; border-top:1px solid var(--dim); }
   #panel .title { color:var(--dim); font:12px var(--font); height:18px; }
@@ -61,7 +74,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const view = $("view"), measure = $("measure");
-const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, anns: [], dirty: false, undo: 0, path: null,
+const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, anns: [], rv: null, rvOrig: null, rvView: null, rvCur: null, rvElapsed: 0, dirty: false, undo: 0, path: null,
             search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false };
 let sentTimer = null, closedSent = false;
 
@@ -85,7 +98,9 @@ function lineNode(i) {
   for (const h of S.hls) add(h.re, "hl:" + (h.color || ""));
   if (S.search) add(S.search.re, i === S.curLine ? "cur" : "hit");
   for (const r of annRangesFor(i)) ranges.push(r);
-  if (annRow(i)) d.classList.add("annrow");
+  for (const r of rvRangesFor(i)) ranges.push(r);
+  if (S.rvView) { const k = S.rvView.kinds[i]; if (k && k.island >= 0) { const cl = rvLineClasses(k.k, S.rv.islands[k.island].decision); if (cl) cl.split(" ").forEach(c => d.classList.add(c)); if (k.island === S.rvCur) d.classList.add("rv-cur"); } }
+  { const k = annRow(i); if (k) { d.classList.add("annrow"); d.classList.add("annrow-" + k); } }
   { const vr = visRangesFor(i), cr = vr.find(r => r[2] === "vcur");       // the cursor block always shows: split other highlights around it
     for (const r of vr) if (r[2] !== "vcur") ranges.push(r);
     if (cr) {
@@ -161,7 +176,7 @@ function render() {
     pos.textContent = `lines ${S.top + 1}-${S.bottom + 1} of ${n} (${pct}%)`;
     if (S.atEnd) { const e = document.createElement("span"); e.className = "end"; e.textContent = "  (END)"; pos.appendChild(e); }
   }
-  $("bsrch").textContent = S.search ? `/${S.search.src}  ${S.matchLines.length} line${S.matchLines.length === 1 ? "" : "s"}` : "";
+  $("bsrch").textContent = S.rvView ? rvDetail() : S.search ? `/${S.search.src}  ${S.matchLines.length} line${S.matchLines.length === 1 ? "" : "s"}` : "";
   scheduleState();
 }
 
@@ -260,6 +275,8 @@ function runPrompt(ch, v) {
     if ((m = /^([%*.$0-9,'<>]*)!(.+)$/.exec(v))) { filterRange(m[1], m[2]); return; }
     if ((m = /^([%*.$0-9,'<>]*)s([^\w\s\\"|].*)$/.exec(v))) { substitute(m[1], m[2][0], m[2].slice(1)); return; }
     if (v === "annotations") { showAnnotations(); return; }
+    if ((m = /^revise(?:\s+(\d+))?$/.exec(v))) { startRevise(m[1] ? { id: +m[1] } : {}); return; }
+    if ((m = /^set backend (claude|api)$/.exec(v))) { sendCmd({ cmd: "backend", value: m[1] }).then(j => flash(j.ok ? "backend: " + m[1] : j.error)); return; }
     if ((m = /^annotate\s+(.+)$/.exec(v))) { saveAnnotation({ file: true }, m[1]).then(() => 0); return; }
     if ((m = /^unannotate(!?)\s+(\d+)$/.exec(v))) { sendCmd({ cmd: "unannotate", id: +m[2], restore: !!m[1] }).then(j => flash(j.ok ? (m[1] ? "note restored" : "note hidden") : j.error)); return; }
     if (v === "q" || v === "quit") tryQuit(false); else if (v === "q!") tryQuit(true);
@@ -285,7 +302,10 @@ function cmpPos(a, b) { return a[0] - b[0] || a[1] - b[1]; }
 
 function setMode() {
   const pend = (S.count || "") + (S.op || "") + (S.pend || "");
-  $("bmode").textContent = S.vis ? (S.vis.mode === "V" ? "-- VISUAL LINE --" : "-- VISUAL --") + (S.count ? " " + S.count : "") : pend ? pend + " …" : "";
+  let t = S.vis ? (S.vis.mode === "V" ? "-- VISUAL LINE --" : "-- VISUAL --") + (S.count ? " " + S.count : "") : pend ? pend + " …" : "";
+  if (S.rv && S.rv.state === "running") t = "revising… " + Math.round(S.rvElapsed || 0) + " s (Esc cancels)";
+  else if (S.rv && S.rv.state === "ready") t = S.rv.islands.length ? "-- REVIEW " + ((S.rvCur || 0) + 1) + "/" + S.rv.islands.length + " --" : "-- REVIEW: nothing to review --";
+  $("bmode").textContent = t;
 }
 function visRange() {
   let a = [S.vis.ar, S.vis.ac], h = [S.cur.r, S.cur.c];
@@ -525,6 +545,7 @@ function pendingKey(k) {             // g, z and r prefixes in normal mode
   if (p === "g") {
     if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); }
     else if (k === "v") reselect();
+    else if (k === "r") startRevise({});                                              // gr: revise this file from its open notes
   } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); }
   else if (p === "!") { if (k === "!") openPrompt(":", ".!"); }                           // !! filters the current line
   else if (p === "]" || p === "[") { if (k === "a") nextAnnotation(p === "]" ? 1 : -1); }
@@ -569,7 +590,10 @@ function visKey(k) {
   if (S.pend === "g") {
     S.pend = null; setMode();
     if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); return true; }
-    if (k === "s") { flash("gs (whole-book slop review) is not built yet"); return true; }
+    if (k === "r") {                 // gr in visual mode: only the notes inside the selection
+      const R = visRange(), mode = v.mode, rg = rangeOf(mode, [R.sr, R.sc], [R.er, R.ec]); exitVisual();
+      startRevise({ r1: rg.r1, c1: rg.c1, r2: rg.r2, c2: rg.c2 }); return true;
+    }
   }
   const soon = what => { flash(what + " is not built yet"); return true; };
   if (countKey(k)) return true;
@@ -594,8 +618,13 @@ function visKey(k) {
       openPanel("note on the selection: Ctrl-Enter saves, Esc cancels", "", txt => saveAnnotation(rg, txt)); return true;
     }
     case "!": { const mode = v.mode; exitVisual(); openPrompt(":", mode === "V" ? "'<,'>!" : "'<>!"); return true; }
-    case "s": return soon("s (slop review)");
-    case "S": return soon("S (fix the selection)");
+    case "s": case "K": {            // s: this is slop (a word on why is optional); K: keep -- leave this alone
+      const R = visRange(), mode = v.mode; exitVisual();
+      const rg = rangeOf(mode, [R.sr, R.sc], [R.er, R.ec]);
+      if (k === "K") saveAnnotation(rg, "", "keep");
+      else openPanel("slop -- what is wrong with it? (optional) Ctrl-Enter saves, Esc cancels", "", txt => saveAnnotation(rg, txt, "slop"));
+      return true;
+    }
   }
   if (motionDest(k)) { moveBy(k, takeCount()); return true; }
   S.count = 0; setMode();
@@ -732,28 +761,31 @@ async function substitute(rangeStr, delim, body) {
    where it was made -- but only while the text there is still what was selected; a note over several paragraphs puts a mark in the
    margin of those paragraphs; a note on the whole file has no place, and is found with :annotations. */
 function annRangesFor(i) {
-  const out = [];
+  const out = []; if (S.rvView) return out;
   for (const a of S.anns) {
+    if (a.status === "done") continue;                                          // a note whose change was accepted is finished: not drawn
     if (a.scope !== "text" || a.r1 !== i + 1 || a.r2 !== a.r1 || a.text == null) continue;
     const cps = lcp(i);
     if (cps.slice(a.c1 - 1, a.c2 - 1).join("") !== a.text) continue;             // the text has changed since: do not mark the wrong words
     const u = k => cps.slice(0, k).join("").length;
-    out.push([u(a.c1 - 1), u(a.c2 - 1), "ann"]);
+    out.push([u(a.c1 - 1), u(a.c2 - 1), "ann ann-" + (a.kind || "note")]);
   }
   return out;
 }
-function annRow(i) {
+function annRow(i) {                // the kind of the first open note over several paragraphs that covers line i, or null
+  if (S.rvView) return null;
   for (const a of S.anns) {
-    if (a.scope !== "paragraphs" || !a.paragraphs) continue;
-    const m = /^(\d+)-(\d+)$/.exec(a.paragraphs); if (m && i + 1 >= +m[1] && i + 1 <= +m[2]) return true;
+    if (a.status === "done" || a.scope !== "paragraphs" || !a.paragraphs) continue;
+    const m = /^(\d+)-(\d+)$/.exec(a.paragraphs); if (m && i + 1 >= +m[1] && i + 1 <= +m[2]) return a.kind || "note";
   }
-  return false;
+  return null;
 }
 function annPositions() {            // where the notes are, in reading order: [{ r, c, note }] (rows and columns from 0)
   const out = [];
   for (const a of S.anns) {
-    if (a.scope === "text") out.push({ r: a.r1 - 1, c: a.c1 - 1, note: a.note, id: a.id });
-    else if (a.scope === "paragraphs" && a.paragraphs) { const m = /^(\d+)-/.exec(a.paragraphs); if (m) out.push({ r: +m[1] - 1, c: 0, note: a.note, id: a.id }); }
+    if (a.status === "done") continue;
+    if (a.scope === "text") out.push({ r: a.r1 - 1, c: a.c1 - 1, note: a.note, id: a.id, kind: a.kind });
+    else if (a.scope === "paragraphs" && a.paragraphs) { const m = /^(\d+)-/.exec(a.paragraphs); if (m) out.push({ r: +m[1] - 1, c: 0, note: a.note, id: a.id, kind: a.kind }); }
   }
   return out.sort((x, y) => x.r - y.r || x.c - y.c || x.id - y.id);
 }
@@ -762,17 +794,17 @@ function nextAnnotation(dir) {       // ]a and [a: the next / previous note, wra
   const here = [S.cur.r, S.cur.c];
   let p = dir > 0 ? ps.find(x => cmpPos([x.r, x.c], here) > 0) : [...ps].reverse().find(x => cmpPos([x.r, x.c], here) < 0);
   if (!p) p = dir > 0 ? ps[0] : ps[ps.length - 1];
-  setCursor(p.r, p.c); flash("#" + p.id + ": " + p.note.split("\n")[0].slice(0, 160));
+  setCursor(p.r, p.c); flash("#" + p.id + " " + (p.kind || "note") + (p.note ? ": " + p.note.split("\n")[0].slice(0, 160) : ""));
 }
-async function saveAnnotation(rg, txt) {
-  if (!txt.trim()) return;
-  const j = await sendCmd(rg.file ? { cmd: "annotate", file: true, note: txt } : { cmd: "annotate", r1: rg.r1, c1: rg.c1, r2: rg.r2, c2: rg.c2, note: txt });
-  flash(j.ok ? "note " + j.id + " saved (" + j.scope + ")" : "not saved: " + j.error);
+async function saveAnnotation(rg, txt, kind = "note") {
+  if (kind === "note" && !txt.trim()) return;                                   // a slop or keep mark needs no words
+  const j = await sendCmd(rg.file ? { cmd: "annotate", kind, file: true, note: txt } : { cmd: "annotate", kind, r1: rg.r1, c1: rg.c1, r2: rg.r2, c2: rg.c2, note: txt });
+  flash(j.ok ? (j.kind || kind) + " " + j.id + " saved (" + j.scope + ")" : "not saved: " + j.error);
 }
 async function showAnnotations() {
   const j = await sendCmd({ cmd: "annotations" });
   if (!j.ok) { flash(j.error); return; }
-  const rows = (j.items || []).map(a => "#" + a.id + "  " + (a.scope === "text" ? a.r1 + ":" + a.c1 : a.scope === "paragraphs" ? "paragraphs " + a.paragraphs : "whole file") + "  " + a.note.split("\n")[0]);
+  const rows = (j.items || []).map(a => "#" + a.id + "  " + (a.kind || "note") + (a.status === "done" ? " (done)" : "") + "  " + (a.scope === "text" ? a.r1 + ":" + a.c1 : a.scope === "paragraphs" ? "paragraphs " + a.paragraphs : "whole file") + "  " + a.note.split("\n")[0]);
   openPanel("notes on " + (S.name || "this file") + "  --  ]a [a jump between them; :unannotate N hides one; Esc closes", rows.length ? rows.join("\n") : "(no notes yet: select text and press n)", () => {});
 }
 async function filterRange(rangeStr, command) {   // :range!command -- replace the range with the output of a shell command run on it
@@ -785,6 +817,161 @@ async function filterRange(rangeStr, command) {   // :range!command -- replace t
   flash("running: " + command);
   const j = await sendCmd({ cmd: "filter", r1: range.r1, c1: range.c1, r2: range.r2, c2: range.c2, command, linewise });
   noteResult(j); flash(j.ok ? "filtered" : "filter: " + j.error);
+}
+
+/* ---------- revising with a model, and reviewing what it proposes ---------- */
+/* gr asks the model to address the open notes; the server runs it in the background and checks every proposed edit.  When it is ready
+   the window shows the document with each change in place (old text struck on red, new text on green, the changed words picked out),
+   and n N y q c Y Enter Esc decide.  Nothing touches the file until Enter. */
+function wordTokens(s) {
+  const out = [], re = /\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu; let m;
+  while ((m = re.exec(s))) out.push({ t: m[0], s: m.index, e: m.index + m[0].length });
+  return out;
+}
+function mergeRanges(r) {
+  const out = [];
+  for (const x of r) { const l = out[out.length - 1]; if (l && x[0] <= l[1]) l[1] = Math.max(l[1], x[1]); else out.push([x[0], x[1]]); }
+  return out;
+}
+function wordDiff(a, b) {            // the words that differ: { del: [[s, e]...] in a, add: [[s, e]...] in b }, as UTF-16 offsets
+  const A = wordTokens(a), B = wordTokens(b), n = A.length, m = B.length;
+  if (n * m > 4000000) return { del: n ? [[0, a.length]] : [], add: m ? [[0, b.length]] : [] };            // too big to compare word by word
+  const L = new Array(n + 1); for (let i = 0; i <= n; i++) L[i] = new Int32Array(m + 1);
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i].t === B[j].t ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const del = [], add = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i].t === B[j].t) { i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) { del.push([A[i].s, A[i].e]); i++; }
+    else { add.push([B[j].s, B[j].e]); j++; }
+  }
+  for (; i < n; i++) del.push([A[i].s, A[i].e]);
+  for (; j < m; j++) add.push([B[j].s, B[j].e]);
+  return { del: mergeRanges(del), add: mergeRanges(add) };
+}
+function splitRanges(text, ranges) { // per-line [s, e] ranges (offsets within each line) for ranges over a multi-line text
+  const lines = text.split("\n"), out = lines.map(() => []); let start = 0;
+  lines.forEach((ln, k) => {
+    const end = start + ln.length;
+    for (const [s, e] of ranges) { const a = Math.max(s, start), b = Math.min(e, end); if (a < b) out[k].push([a - start, b - start]); }
+    start = end + 1;
+  });
+  return out;
+}
+/* The review view: the document's lines with every island expanded in place.  Returns { lines, kinds, first } where kinds[i] is
+   { k: "ctx" | "del" | "add", island: index | -1, wd: [[s, e]...] } and first[g] is the merged index of island g's first line. */
+function rvBuild(orig, islands) {
+  const lines = [], kinds = [], first = []; let row = 1;
+  islands.forEach((is, g) => {
+    for (; row < is.r1; row++) { lines.push(orig[row - 1]); kinds.push({ k: "ctx", island: -1, wd: [] }); }
+    first[g] = lines.length;
+    const wd = wordDiff(is.old, is.new), dels = splitRanges(is.old, wd.del), adds = splitRanges(is.new, wd.add);
+    is.old.split("\n").forEach((t, k) => { lines.push(t); kinds.push({ k: "del", island: g, wd: dels[k] }); });
+    is.new.split("\n").forEach((t, k) => { lines.push(t); kinds.push({ k: "add", island: g, wd: adds[k] }); });
+    row = is.r2 + 1;
+  });
+  for (; row <= orig.length; row++) { lines.push(orig[row - 1]); kinds.push({ k: "ctx", island: -1, wd: [] }); }
+  return { lines, kinds, first };
+}
+function rvLineClasses(kind, decision) {   // CSS classes for a review line
+  if (kind === "ctx") return "";
+  return "rv-" + kind + (decision === "accepted" ? " rv-accepted" : decision === "rejected" ? " rv-rejected" : "");
+}
+function rvRangesFor(i) {            // the changed words on review line i, in UTF-16 offsets of that line
+  if (!S.rvView || !S.rvView.kinds[i]) return [];
+  const k = S.rvView.kinds[i];
+  return k.wd.map(([s, e]) => [s, e, k.k === "del" ? "wd-del" : "wd-add"]);
+}
+
+function rvDetail() {                // the right side of the bar while reviewing: which notes caused this change, and the tally
+  const rv = S.rv; if (!rv || rv.state !== "ready" || !rv.islands.length) return "";
+  const is = rv.islands[S.rvCur]; if (!is) return "";
+  const why = is.edits.map(e => "#" + e.annotation + (e.also ? " also" : "") + (e.why ? ": " + e.why : "")).join("; ");
+  return why + "   [" + rv.accepted + " accepted, " + rv.rejected + " rejected, " + rv.pending + " pending" + (rv.problems.length ? ", " + rv.problems.length + " could not be applied (P)" : "") + "]";
+}
+
+function rvLeave() {                 // back to the plain document
+  if (S.rvOrig) { S.lines = S.rvOrig; S.rvOrig = null; cpCache.clear(); }
+  S.rvView = null;
+}
+function rvEnter() {                 // show the review in place of the document
+  const rv = S.rv;
+  if (!S.rvOrig) S.rvOrig = S.lines;
+  S.rvView = rvBuild(S.rvOrig, rv.islands);
+  S.lines = S.rvView.lines; cpCache.clear();
+  if (S.rvCur == null || S.rvCur >= rv.islands.length) S.rvCur = Math.max(0, rv.islands.findIndex(i => i.decision === "pending"));
+  S.vis = null; S.op = null; S.pend = null;
+  rvGo(S.rvCur);
+}
+function rvGo(g) {                   // move to island g
+  const rv = S.rv; if (!rv || !rv.islands.length) { setMode(); render(); return; }
+  S.rvCur = (g + rv.islands.length) % rv.islands.length;
+  S.top = Math.max(0, S.rvView.first[S.rvCur] - 1); S.off = 0;
+  S.cur = { r: S.rvView.first[S.rvCur], c: 0 }; S.goalX = null;
+  setMode(); render();
+}
+async function refreshReview() {
+  const j = await sendCmd({ cmd: "review", action: "status" });
+  if (!j.ok) return;
+  if (j.state === "none") { const had = S.rv; S.rv = null; rvLeave(); S.rvElapsed = 0; setMode(); render(); if (had && had.state === "ready") loadContent(true); return; }
+  S.rv = j; S.rvElapsed = j.elapsed;
+  if (j.state === "ready") { rvEnter(); if (!j.islands.length) flash(j.problems.length ? "nothing the model proposed could be applied (P lists them); Esc closes" : "the model proposed no changes; Esc closes"); }
+  else if (j.state === "error") {
+    rvLeave(); setMode(); render();
+    openPanel("the model could not help: " + j.error + "  --  Esc closes", j.raw ? "What it said:\n\n" + j.raw : "", () => {});
+  } else { rvLeave(); setMode(); render(); }
+}
+async function startRevise(extra) {
+  const j = await sendCmd(Object.assign({ cmd: "revise" }, extra || {}));
+  if (!j.ok) { flash(j.error); return; }
+  flash("asking the model about " + j.notes + " note(s) (" + j.backend + ")... Esc cancels");
+}
+async function cancelRevise() { await sendCmd({ cmd: "review", action: "cancel" }); flash("revision cancelled; nothing was changed"); }
+async function rvDecide(action, g) {
+  const j = await sendCmd({ cmd: "review", action, n: g + 1 }); if (!j.ok) flash(j.error);
+}
+function rvAdvance() {               // after deciding: on to the next island still pending, else the next one
+  const rv = S.rv; if (!rv) return;
+  for (let k = 1; k <= rv.islands.length; k++) { const g = (S.rvCur + k) % rv.islands.length; if (rv.islands[g].decision === "pending") { S.rvCur = g; return; } }
+  S.rvCur = (S.rvCur + 1) % rv.islands.length;
+}
+async function rvFinish() {
+  const j = await sendCmd({ cmd: "review", action: "finish" });
+  if (!j.ok) { flash(j.error); return; }
+  flash("accepted " + j.accepted + ", rejected " + j.rejected + (j.pending ? ", " + j.pending + " left undecided (rejected)" : "") + " -- " + j.note + (j.commit ? " [" + j.commit + "]" : ""));
+}
+function rvProblems() {
+  const rv = S.rv; if (!rv || !rv.problems.length) { flash("every proposed change could be applied"); return; }
+  openPanel("changes the model proposed that could not be applied (never guessed at)  --  Esc closes",
+    rv.problems.map(p => "#" + p.annotation + "  " + p.problem + "\n    \"" + p.find + "\"").join("\n\n"), () => {});
+}
+const RV_PASS = new Set(["h", "j", "k", "l", "w", "b", "e", "0", "$", "(", ")", "{", "}", "G", "g", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End",
+                         "PageUp", "PageDown", " ", "/", "?"]);
+function rvKey(k) {                  // true when the review took the key
+  const rv = S.rv, g = S.rvCur;
+  if (S.pend) return false;          // g + g or the like: the normal handler finishes it
+  switch (k) {
+    case "n": rvGo(g + 1); return true;
+    case "N": rvGo(g - 1); return true;
+    case "y": case "q": {
+      if (!rv.islands.length) return true;
+      rvDecide(k === "y" ? "accept" : "reject", g); rvAdvance(); return true;
+    }
+    case "Y": sendCmd({ cmd: "review", action: "accept-all" }); return true;
+    case "c": {
+      if (!rv.islands.length) return true;
+      const is = rv.islands[g];
+      openPanel("your own wording for this change (Ctrl-Enter accepts it, Esc cancels)", is.new, async txt => {
+        await sendCmd({ cmd: "review", action: "edit", n: g + 1, text: txt }); await rvDecide("accept", g); rvAdvance();
+      });
+      return true;
+    }
+    case "Enter": if (rv.islands.length || rv.problems.length) { rvFinish(); return true; } sendCmd({ cmd: "review", action: "cancel" }); return true;
+    case "Escape": sendCmd({ cmd: "review", action: "cancel" }); flash("review cancelled; nothing was applied"); return true;
+    case "P": rvProblems(); return true;
+  }
+  if (RV_PASS.has(k)) return false;
+  flash("reviewing: n/N next/previous, y accept, q reject, c your own wording, Y accept all, P problems, Enter finish, Esc cancel");
+  return true;
 }
 
 /* the bottom panel: a larger text box for changes */
@@ -855,8 +1042,10 @@ const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table
 <tr><td><b>3j 2w 3x 2dd d2w 5G</b></td><td>counts work as in vim</td></tr>
 <tr><td><b>p</b> / <b>u</b> / <b>Ctrl-r</b></td><td>paste after the cursor / undo (half page up when there is nothing to undo) / redo</td></tr>
 <tr><td><b>:s/a/b/g</b> <b>:%s/a/b/</b> <b>:2,5s/a/b/</b></td><td>substitute (JavaScript regex; &amp; and \\1 in the replacement); ranges % . $ N,M; from visual mode <b>:</b> offers '&lt;,'&gt;, and '&lt;&gt; means exactly the selection</td></tr>
-<tr><td><b>n</b> (visual)</td><td>a note on the selection (bottom panel; Ctrl-Enter saves) -- kept in a database; <b>:annotations</b> lists them, <b>]a</b> <b>[a</b> jump between them, <b>:unannotate N</b> hides one, <b>:annotate TEXT</b> is a note on the whole file</td></tr>
+<tr><td><b>n</b> <b>s</b> <b>K</b> (visual)</td><td>mark the selection: <b>n</b> a note (an instruction, in the bottom panel; Ctrl-Enter saves), <b>s</b> slop (a word on why is optional), <b>K</b> keep (leave it alone) -- kept in a database, coloured by kind; <b>:annotations</b> lists them, <b>]a</b> <b>[a</b> jump between them, <b>:unannotate N</b> hides one, <b>:annotate TEXT</b> is a note on the whole file</td></tr>
 <tr><td><b>!</b> (visual), <b>!!</b>, <b>:%!cmd</b></td><td>replace the selection / the line / a range with the output of a shell command run on it: <b>:'&lt;,'&gt;!sort</b>, <b>:'&lt;&gt;!tr a-z A-Z</b> (exactly the selection), <b>:.!fmt</b>; one undo step; nothing changes if the command fails</td></tr>
+<tr><td><b>gr</b> (visual: <b>gr</b>), <b>:revise [N]</b></td><td>ask the model to address your open notes (all of them / the ones inside the selection / note N); <b>Esc</b> cancels while it works; <b>:set backend claude|api</b></td></tr>
+<tr><td>in a review</td><td><b>n N</b> next / previous change, <b>y</b> accept, <b>q</b> reject, <b>c</b> your own wording (accepts it), <b>Y</b> accept all, <b>P</b> the changes that could not be applied, <b>Enter</b> finish (applies the accepted ones as one undo step, writes the file and commits it if it was clean), <b>Esc</b> cancel</td></tr>
 <tr><td><b>:history</b> <b>:revert</b></td><td>the earlier versions of the file that writes kept; put one back</td></tr>
 <tr><td><b>:w</b> <b>:w!</b> <b>:q</b> <b>:q!</b> <b>:wq</b></td><td>write the file (the bar shows [+] while there are unsaved changes)</td></tr></table>
 <p>Press any key to close this help.</p>`;
@@ -868,6 +1057,8 @@ function handleKey(k, e) {
   if ($("help").style.display === "block") { toggleHelp(false); return true; }
   if (pendingDash) { pendingDash = false; if (k === "N") { toggleNumbers(); return true; } if (k === "S") { toggleWrap(); return true; } }
   if (S.panel) { if (k === "Escape") closePanel(); return true; }
+  if (k === "Escape" && S.rv && S.rv.state === "running") { cancelRevise(); return true; }
+  if (S.rv && S.rv.state === "ready" && rvKey(k)) return true;
   if (S.vis) return visKey(k);
   if (normKey(k)) return true;
   switch (k) {
@@ -904,7 +1095,9 @@ function geom() {                   // where things actually are on screen (for 
   const c = view.querySelector(".vcur"), cb = c ? c.getBoundingClientRect() : null;
   return { inner: [innerWidth, innerHeight], view: r("view"), bar: r("bar"), panel: r("panel"), panelDisplay: getComputedStyle($("panel")).display,
            cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null,
-           anns: S.anns.length, underlined: view.querySelectorAll(".ann").length, marked: view.querySelectorAll(".annrow").length };
+           anns: S.anns.length, underlined: view.querySelectorAll(".ann").length, marked: view.querySelectorAll(".annrow").length,
+           rvDel: view.querySelectorAll(".rv-del").length, rvAdd: view.querySelectorAll(".rv-add").length, wdDel: view.querySelectorAll(".wd-del").length, wdAdd: view.querySelectorAll(".wd-add").length,
+           mode: $("bmode").textContent, detail: $("bsrch").textContent };
 }
 function sendState() {
   post({ type: "state", name: S.name, err: S.err || null, dirty: S.dirty, undo: S.undo, panel: !!S.panel, geom: geom(), vis: S.vis ? { mode: S.vis.mode, ar: S.vis.ar, ac: S.vis.ac } : null, cur: S.cur, op: S.op, off: Math.round(S.off), top: S.top + 1, bottom: S.bottom + 1, total: total(), atEnd: S.atEnd,
@@ -919,6 +1112,7 @@ async function loadContent(keep = false) {
   S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n"); cpCache.clear();
   if (j.settings) applySettings(j.settings);
   view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());
+  if (S.rv && S.rv.state === "ready") { S.rvOrig = S.lines; S.rvView = rvBuild(S.rvOrig, S.rv.islands); S.lines = S.rvView.lines; cpCache.clear(); }
   S.vis = null; setMode();
   if (keep) {                        // the text was edited: keep the place, drop the selection
     S.top = clamp(S.top, 0, Math.max(0, total() - 1)); S.off = 0;
@@ -940,6 +1134,8 @@ function onCommand(c) {
   switch (c.cmd) {
     case "load": loadContent(); break;
     case "reload": loadContent(true); break;
+    case "review": refreshReview(); break;
+    case "revise": S.rvElapsed = c.elapsed; setMode(); break;
     case "goto": c.line ? gotoLine(c.line) : c.percent !== undefined ? gotoPercent(c.percent) : c.where === "bottom" ? gotoBottom() : gotoTop(); break;
     case "scroll": if (c.page) { c.n >= 0 ? pageDown(Math.abs(c.n) || 1) : pageUp(Math.abs(c.n)); } else if (c.n >= 0) lineDown(c.n); else lineUp(-c.n); break;
     case "search": doSearch(c.pattern, !!c.backward); break;
@@ -962,7 +1158,7 @@ function onCommand(c) {
 function connect() {
   const es = new EventSource("/events");
   es.onmessage = ev => { try { onCommand(JSON.parse(ev.data)); } catch (e) { S.err = ((e && e.stack) || String(e)).slice(0, 500); console.error(e); try { sendState(); } catch (x) {} } };
-  es.onopen = () => { post({ type: "hello" }); loadContent(); };
+  es.onopen = () => { post({ type: "hello" }); loadContent().then(refreshReview); };
   es.onerror = () => { /* the browser reconnects by itself */ };
 }
 window.addEventListener("beforeunload", e => { if (S.dirty && !closedSent) { e.preventDefault(); e.returnValue = "You have unsaved changes."; return e.returnValue; } });   // closing the window with unsaved edits asks first

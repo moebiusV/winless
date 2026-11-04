@@ -55,9 +55,39 @@ void edit_endpos(long r1, long c1, const char *repl, size_t rlen, long *r2, long
 
 /* ---- store.c ---- (the annotation database; each returns NULL on success, else an error message) */
 const char *store_add(const char *file, long r1, long c1, long r2, long c2, const char *scope, const char *selected,
-                      const char *paragraphs, const char *note, long *id);      /* r1 == 0: no position (scope "file") */
+                      const char *paragraphs, const char *note, const char *kind, long *id);   /* r1 == 0: no position (scope "file"); kind: note | slop | keep */
+const char *store_set_status(long id, const char *status);
+const char *store_add_review(const char *file, const char *backend, const char *model, const char *scope, const char *annotations,
+                             long accepted, long rejected, long pending, int written, const char *commit, const char *note);                      /* open | done */
 const char *store_list_json(sb_t *out, const char *file, int include_deleted);  /* a JSON array; file == NULL: every file */
 const char *store_set_deleted(long id, int deleted);                            /* hide a note, or bring it back */
+
+/* ---- edits.c ---- (the model's proposed edits: parse, verify, group into islands, apply) */
+typedef struct {
+    long annotation; int also;              /* the note this answers (0: none); also: an extra spot found for a slop mark */
+    char *find, *replace, *why;             /* replace the exact text `find` with `replace`, because `why` */
+    int ok; size_t off, len; char *problem; /* after edits_verify: ok and the byte range found, or why it could not be applied */
+} edit_item;
+typedef struct { long id; size_t off, len; } keep_span;      /* text the author marked keep: no edit may touch it */
+typedef struct {
+    long r1, r2;                            /* the original lines the island covers (1-based, inclusive) */
+    size_t off, len;                        /* their bytes in the original (without the final newline) */
+    size_t *idx; size_t nidx;               /* the edits in it */
+    char *old_text, *new_text;              /* those lines before and after the edits */
+} island;
+const char *edits_parse(const char *reply, size_t len, edit_item **out, size_t *n);    /* NULL, or an error message */
+void edits_free(edit_item *e, size_t n);
+size_t edits_verify(const char *text, size_t tlen, edit_item *e, size_t n, const keep_span *keep, size_t nkeep);   /* returns how many are ok */
+size_t edits_islands(const char *text, size_t tlen, const edit_item *e, size_t n, island **out);
+void islands_free(island *is, size_t n);
+char *edits_apply(const char *text, size_t tlen, const edit_item *e, const island *is, size_t nis, const int *accept, size_t *outlen);
+
+/* ---- llm.c ---- (what the model is told, and the command line of the claude backend; nothing here runs a process) */
+const char *llm_system_prompt(void);
+void llm_user_message(sb_t *out, const char *doc, size_t doclen, const char *annotations_json);
+void llm_request_json(sb_t *out, const char *system, const char *user, size_t userlen, const char *model);
+char **llm_claude_argv(const char *system, const char *model, const char *effort);
+void llm_free_argv(char **a);
 
 /* ---- server.c ---- */
 int server_run(int port, double idle_secs);              /* serve until stopped (or, if idle_secs > 0, until no window has been connected and no edits are unsaved for that long) */

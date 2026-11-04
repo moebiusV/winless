@@ -1,6 +1,11 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Revising with a model: mark text (n note, s slop, K keep), then `gr` hands the open notes to a model (claude -p by default; background job,
+  Esc cancels) which answers with a list of edits.  winless verifies each edit (the text must occur exactly once and not touch a keep or
+  another edit), shows the changes in place with word-level highlights, and you decide: n N y q c Y Enter Esc.  Finishing applies the
+  accepted changes as one undo step, marks their notes done, and writes + commits the file if it was clean (never sweeping in your own
+  uncommitted edits).  Commands: revise, review, backend; annotate --kind.  The API backend is not built yet.
   Annotations: `n` in visual mode saves a note on the selection in a SQLite database (file, time, begin and end row and column,
   the selected text, the note; several paragraphs store which ones, a whole-file note says so); notes are underlined or marked in the
   margin, listed with :annotations, visited with ]a / [a, hidden with :unannotate (never deleted).  Commands: annotate, annotations,

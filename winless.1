@@ -71,12 +71,21 @@ is made in the server's copy of the text (undoable, shown with [+]); the file is
 .B undo
 Undo the last edit.
 .TP
-.B annotate R1 C1 R2 C2 NOTE
+.B annotate [\-\-kind note|slop|keep] R1 C1 R2 C2 [NOTE]
 .TQ
-.B annotate \-\-file NOTE
+.B annotate [\-\-kind K] \-\-file [NOTE]
 Add a note on a range (rows and columns from 1, columns in code points, the end excluded, as for
 .BR edit ),
 or on the whole file. See ANNOTATIONS.
+.TP
+.B revise [\-\-backend B] [\-\-id N | \-\-range R1 C1 R2 C2] [\-\-wait]
+Ask a model to address the open notes (all, note N, or those inside a range). With \-\-wait, wait for it and print the proposed changes.
+.TP
+.B review status | accept N | reject N | accept\-all | reject\-all | edit N TEXT | finish | cancel
+Look at, decide, or finish the current review.
+.TP
+.B backend claude|api
+Choose the model backend for this server.
 .TP
 .B annotations [\-\-all] [\-\-deleted]
 List the notes on this file (or on every file); \-\-deleted includes hidden ones.
@@ -138,6 +147,55 @@ needs a range, so a mistyped :!command cannot overwrite anything.
 .PP
 Because a filter runs shell commands, the server only answers requests from pages on this machine: a request with a Host or Origin
 that is not localhost or 127.0.0.1 on its own port (another website, or a rebound hostname) is refused.
+.SH REVISING WITH A MODEL
+Mark text while you read, then hand all the marks to a model at once. In visual mode
+.B n
+makes a note (an instruction in your own words),
+.B s
+marks slop (writing of the kind you do not want; the words on why are optional) and
+.B K
+marks text to keep untouched. Then
+.B gr
+asks the model to address this file's open notes (in visual mode, only those inside the selection;
+.B :revise N
+just note N). The model is not asked to rewrite anything: it answers with a list of edits, each naming the exact text to find, what
+to put instead, and why. winless checks every edit against the real text: the text must occur exactly once and must not overlap
+text marked keep or another edit, or it is listed as one that could not be applied (never guessed at;
+.B P
+shows them). The changes are shown in place, old text struck on red and new text on green with the changed words picked out, and
+the bar says which note caused each one. Nothing is applied yet. In the review,
+.B n
+and
+.B N
+move to the next and previous change, wrapping around;
+.B y
+accepts and
+.B q
+rejects the current one and moves on;
+.B c
+lets you type your own wording (and accepts it);
+.B Y
+accepts all;
+.B Enter
+finishes and
+.B Esc
+cancels. Finishing applies the accepted changes as one undoable edit, marks the notes they answered done, and, if the text had no
+unsaved edits, writes the file (the write history keeps the old one) and commits it with git, but only if the file was in a
+repository with no uncommitted changes beforehand, so your own edits are never swept into a commit. Otherwise the result is left unsaved
+and winless says why. The review is recorded in the reviews table of the database. A revision is refused if the text changed while the
+model was working.
+.PP
+The model is run in the background, so the window stays usable;
+.B Esc
+cancels. The backend is
+.B claude
+(the default: `claude -p` with no tools and no saved session, so it can only answer) or
+.B api
+(not built yet);
+.B :set backend
+or
+.B winless backend
+switches it, and the environment variables below set the default.
 .SH REVERTING
 Every write keeps what it is about to replace, in ~/.local/share/winless/history/ (one directory per file, one numbered snapshot per
 write). A write whose old content is identical to the new writes nothing extra, and if the old content cannot be kept the write is
@@ -189,6 +247,25 @@ the replacement. :w, :w!, :q, :q! and :wq write and quit as in vim; q refuses wh
 changes. Edits live in the server until written, and a write that would overwrite a file changed by someone else is refused.
 Open a file (not standard input) to edit.
 .SH ENVIRONMENT
+.TP
+.B WINLESS_BACKEND
+The model backend for revisions: claude (default) or api. Read by the server when it starts.
+.TP
+.B WINLESS_MODEL
+The model name passed to the backend (claude: \-\-model).
+.TP
+.B WINLESS_EFFORT
+The effort level passed to claude (\-\-effort).
+.TP
+.B WINLESS_LLM
+Run this shell command instead of a backend: the request as JSON ({"system", "user", "model"}) on its standard input, the reply on
+standard output. For testing, or another provider.
+.TP
+.B WINLESS_LLM_TIMEOUT
+Seconds to wait for the model (default 900).
+.TP
+.B WINLESS_CLAUDE
+The claude executable (default: claude, from PATH).
 .TP
 .B WINLESS_PORT
 Server port. 

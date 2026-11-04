@@ -490,7 +490,9 @@ static void filter_command(const jv *v, sb_t *r) {
 static void annotate_command(const jv *v, sb_t *r) {
     if (!H.path) { put_result(r, "no file: the text was not opened from a file"); return; }
     const char *note = json_gets(v, "note", NULL);
-    if (!note || !*note) { put_result(r, "the note is empty"); return; }
+    const char *kind = json_gets(v, "kind", NULL); if (!kind || !*kind) kind = "note";
+    if (strcmp(kind, "note") && strcmp(kind, "slop") && strcmp(kind, "keep")) { put_result(r, "the kind must be note, slop or keep"); return; }
+    if ((!note || !*note) && !strcmp(kind, "note")) { put_result(r, "the note is empty"); return; }          /* slop and keep need no words */
     long id = 0; const char *err, *scope; char paras[48] = ""; char *sel = NULL;
     long r1 = (long)json_getnum(v, "r1", 0), c1 = (long)json_getnum(v, "c1", 0), r2 = (long)json_getnum(v, "r2", 0), c2 = (long)json_getnum(v, "c2", 0);
     if (json_getbool(v, "file", 0)) { scope = "file"; r1 = c1 = r2 = c2 = 0; }
@@ -503,17 +505,405 @@ static void annotate_command(const jv *v, sb_t *r) {
         else if (last == r1) { scope = "text"; size_t bl = b - a; if (bl && H.text[a + bl - 1] == '\n') bl--; sel = xstrndup(H.text + a, bl); }
         else { scope = "paragraphs"; snprintf(paras, sizeof paras, "%ld-%ld", r1, last); }
     }
-    err = store_add(H.path, r1, c1, r2, c2, scope, sel, paras[0] ? paras : NULL, note, &id);
+    err = store_add(H.path, r1, c1, r2, c2, scope, sel, paras[0] ? paras : NULL, note ? note : "", kind, &id);
     free(sel);
     if (err) { put_result(r, err); return; }
     const char *m = "{\"cmd\":\"reload\"}"; broadcast(m, strlen(m));        /* pages redraw their annotations */
-    sb_printf(r, "{\"ok\":true,\"id\":%ld,\"scope\":\"%s\"}", id, scope);
+    sb_printf(r, "{\"ok\":true,\"id\":%ld,\"scope\":\"%s\",\"kind\":\"%s\"}", id, scope, kind);
+}
+
+/* ------------------------------------------------------------------------------------------------ revision
+ * The author marks text (notes, slop, keep); `revise` hands the open notes to a model, which answers with a list of edits; every edit is
+ * checked (edits.c) and shown as an island to accept or reject; `finish` applies the accepted ones as ONE undoable edit.  The model runs
+ * as a child process that the server polls between requests, so the window never freezes while it thinks. */
+typedef struct {
+    int active; pid_t pid; int fin, fout, ferr;
+    sb_t in, out, err; size_t inpos;
+    double started, deadline, last_progress; int out_eof, err_eof;
+} job_t;
+static job_t g_job;
+
+enum { RV_NONE, RV_RUNNING, RV_READY, RV_ERROR };
+static struct {
+    int state; char *error, *raw;
+    char *base; size_t baselen; int base_dirty;                   /* the text the model was asked about, and whether it had unsaved edits */
+    edit_item *edits; size_t nedits;
+    island *isl; size_t nisl; int *decision; char **custom;       /* decision: 0 pending, 1 accepted, 2 rejected; custom: a replacement the author typed */
+    keep_span *keep; size_t nkeep;
+    long *ann; size_t nann;                                       /* the notes this revision answers */
+    char scope[24], backend[16]; double started;
+} RV;
+static char g_backend[16];                                        /* set with the `backend` command; else $WINLESS_BACKEND; else claude */
+
+static void rv_clear(void) {
+    free(RV.error); free(RV.raw); free(RV.base);
+    edits_free(RV.edits, RV.nedits); islands_free(RV.isl, RV.nisl);
+    if (RV.custom) for (size_t i = 0; i < RV.nisl; i++) free(RV.custom[i]);
+    free(RV.custom); free(RV.decision); free(RV.keep); free(RV.ann);
+    memset(&RV, 0, sizeof RV);
+}
+static void tell_pages_review(void) { const char *m = "{\"cmd\":\"review\"}"; broadcast(m, strlen(m)); }
+
+static void job_close_fds(void) {
+    if (g_job.fin >= 0) close(g_job.fin);
+    if (g_job.fout >= 0) close(g_job.fout);
+    if (g_job.ferr >= 0) close(g_job.ferr);
+    g_job.fin = g_job.fout = g_job.ferr = -1;
+}
+static void job_kill(void) {
+    if (!g_job.active) return;
+    kill(-g_job.pid, SIGKILL); kill(g_job.pid, SIGKILL);
+    int st; waitpid(g_job.pid, &st, 0);
+    job_close_fds(); sb_free(&g_job.in); sb_free(&g_job.out); sb_free(&g_job.err);
+    memset(&g_job, 0, sizeof g_job);
+}
+
+static const char *job_start(char *const argv[], const char *input, size_t inlen, double timeout) {
+    int pin[2], pout[2], perr[2];
+    if (pipe(pin) < 0) return "cannot start the model command";
+    if (pipe(pout) < 0) { close(pin[0]); close(pin[1]); return "cannot start the model command"; }
+    if (pipe(perr) < 0) { close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]); return "cannot start the model command"; }
+    char dir[1024]; winless_data_dir(dir, sizeof dir);
+    pid_t pid = fork();
+    if (pid < 0) { close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]); close(perr[0]); close(perr[1]); return "cannot start the model command"; }
+    if (pid == 0) {
+        setpgid(0, 0);                                            /* its own group, so a cancel stops whatever it started */
+        dup2(pin[0], 0); dup2(pout[1], 1); dup2(perr[1], 2);
+        for (int fd = 3; fd < 1024; fd++) close(fd);
+        if (chdir(dir) != 0) { /* run where we are */ }          /* a neutral directory: not the book's, so no project instructions leak in */
+        execvp(argv[0], argv);
+        dprintf(2, "cannot run %s: %s\n", argv[0], strerror(errno));
+        _exit(127);
+    }
+    close(pin[0]); close(pout[1]); close(perr[1]);
+    memset(&g_job, 0, sizeof g_job);
+    g_job.active = 1; g_job.pid = pid; g_job.fin = pin[1]; g_job.fout = pout[0]; g_job.ferr = perr[0];
+    fcntl(g_job.fin, F_SETFL, fcntl(g_job.fin, F_GETFL) | O_NONBLOCK); fcntl(g_job.fout, F_SETFL, fcntl(g_job.fout, F_GETFL) | O_NONBLOCK); fcntl(g_job.ferr, F_SETFL, fcntl(g_job.ferr, F_GETFL) | O_NONBLOCK);
+    sb_init(&g_job.in); sb_init(&g_job.out); sb_init(&g_job.err); sb_put(&g_job.in, input, inlen);
+    g_job.started = now_monotonic(); g_job.deadline = g_job.started + timeout; g_job.last_progress = g_job.started;
+    return NULL;
+}
+
+static void rv_fail(const char *msg) { free(RV.error); RV.error = xstrdup(msg); RV.state = RV_ERROR; tell_pages_review(); }
+
+/* The model has finished (or failed): turn its reply into a review. */
+static void rv_job_done(int status, int timed_out, const sb_t *out, const sb_t *err) {
+    if (RV.state != RV_RUNNING) return;
+    char tail[420]; size_t el = err->len, from = el > 300 ? el - 300 : 0;
+    snprintf(tail, sizeof tail, "%s", err->s + from);
+    for (size_t i = strlen(tail); i > 0 && (tail[i - 1] == '\n' || tail[i - 1] == '\r' || tail[i - 1] == ' '); i--) tail[i - 1] = 0;
+    char msg[600];
+    if (timed_out) { rv_fail("the model did not answer in time (raise $WINLESS_LLM_TIMEOUT, in seconds, if the file is large)"); return; }
+    if (status == 127) { snprintf(msg, sizeof msg, "cannot run the model command: %s", tail); rv_fail(msg); return; }
+    if (status != 0) { snprintf(msg, sizeof msg, "the model command failed (exit %d)%s%s", status, tail[0] ? ": " : "", tail); rv_fail(msg); return; }
+    edit_item *e; size_t n;
+    const char *perr = edits_parse(out->s, out->len, &e, &n);
+    if (perr) {
+        RV.raw = xstrndup(out->s, out->len < 4000 ? out->len : 4000);
+        snprintf(msg, sizeof msg, "the model's reply could not be used: %s", perr); rv_fail(msg); return;
+    }
+    edits_verify(RV.base, RV.baselen, e, n, RV.keep, RV.nkeep);
+    RV.edits = e; RV.nedits = n;
+    RV.nisl = edits_islands(RV.base, RV.baselen, e, n, &RV.isl);
+    RV.decision = xmalloc((RV.nisl ? RV.nisl : 1) * sizeof *RV.decision); memset(RV.decision, 0, (RV.nisl ? RV.nisl : 1) * sizeof *RV.decision);
+    RV.custom = xmalloc((RV.nisl ? RV.nisl : 1) * sizeof *RV.custom); memset(RV.custom, 0, (RV.nisl ? RV.nisl : 1) * sizeof *RV.custom);
+    RV.state = RV_READY; tell_pages_review();
+}
+
+/* Called between requests: feed the model its input, collect its output, notice when it is done or late. */
+static void job_pump(void) {
+    if (!g_job.active) return;
+    double now = now_monotonic();
+    if (g_job.fin >= 0) {
+        while (g_job.inpos < g_job.in.len) {
+            ssize_t w = write(g_job.fin, g_job.in.s + g_job.inpos, g_job.in.len - g_job.inpos);
+            if (w > 0) { g_job.inpos += (size_t)w; continue; }
+            if (w < 0 && (errno == EAGAIN || errno == EINTR)) break;
+            g_job.inpos = g_job.in.len; break;                    /* the command stopped reading: that is its business */
+        }
+        if (g_job.inpos >= g_job.in.len) { close(g_job.fin); g_job.fin = -1; }
+    }
+    char buf[65536];
+    for (int which = 0; which < 2; which++) {
+        int fd = which ? g_job.ferr : g_job.fout; int *eof = which ? &g_job.err_eof : &g_job.out_eof; sb_t *dst = which ? &g_job.err : &g_job.out;
+        while (!*eof) {
+            ssize_t k = read(fd, buf, sizeof buf);
+            if (k > 0) { if (!which || dst->len < 20000) sb_put(dst, buf, (size_t)k); continue; }
+            if (k < 0 && errno == EINTR) continue;
+            if (k < 0 && errno == EAGAIN) break;
+            *eof = 1;
+        }
+    }
+    int timed_out = 0, status = 0;
+    if (g_job.out_eof && g_job.err_eof) { int st = 0; waitpid(g_job.pid, &st, 0); status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0); }
+    else if (now >= g_job.deadline) { timed_out = 1; kill(-g_job.pid, SIGKILL); kill(g_job.pid, SIGKILL); int st; waitpid(g_job.pid, &st, 0); }
+    else {
+        if (now - g_job.last_progress >= 1.0) {
+            g_job.last_progress = now;
+            char m[120]; snprintf(m, sizeof m, "{\"cmd\":\"revise\",\"elapsed\":%.0f,\"bytes\":%zu}", now - g_job.started, g_job.out.len); broadcast(m, strlen(m));
+        }
+        return;
+    }
+    job_close_fds();
+    sb_t out = g_job.out, err = g_job.err; sb_free(&g_job.in);
+    memset(&g_job, 0, sizeof g_job);
+    rv_job_done(status, timed_out, &out, &err);
+    sb_free(&out); sb_free(&err);
+}
+
+/* ---- collecting the author's open notes for the request ---- */
+static void add_keep(long id, size_t off, size_t len) {
+    RV.keep = xrealloc(RV.keep, (RV.nkeep + 1) * sizeof *RV.keep);
+    RV.keep[RV.nkeep].id = id; RV.keep[RV.nkeep].off = off; RV.keep[RV.nkeep].len = len; RV.nkeep++;
+}
+static int parse_rows(const char *s, long *a, long *b) { return s && sscanf(s, "%ld-%ld", a, b) == 2; }
+
+static const char *rv_collect(const jv *v, sb_t *annjson) {
+    long only = (long)json_getnum(v, "id", 0);
+    int ranged = json_get(v, "r1") != NULL;
+    long R1 = (long)json_getnum(v, "r1", 0), C1 = (long)json_getnum(v, "c1", 0), R2 = (long)json_getnum(v, "r2", 0), C2 = (long)json_getnum(v, "c2", 0);
+    long Rlast = (C2 == 1 && R2 > R1) ? R2 - 1 : R2;
+    sb_t list; sb_init(&list);
+    const char *err = store_list_json(&list, H.path, 0);
+    if (err) { sb_free(&list); return err; }
+    jv *arr = json_parse(list.s, list.len); sb_free(&list);
+    if (!arr || arr->t != J_ARR) { json_free(arr); return "cannot read the notes"; }
+    sb_puts(annjson, "[");
+    for (size_t i = 0; i < arr->n; i++) {
+        const jv *it = arr->items[i];
+        const char *status = json_gets(it, "status", NULL), *kind = json_gets(it, "kind", NULL), *scope = json_gets(it, "scope", NULL);
+        if (!kind || !scope || (status && !strcmp(status, "done"))) continue;
+        long id = (long)json_getnum(it, "id", 0), r1 = (long)json_getnum(it, "r1", 0), c1 = (long)json_getnum(it, "c1", 0), r2 = (long)json_getnum(it, "r2", 0), c2 = (long)json_getnum(it, "c2", 0);
+        const char *text = json_gets(it, "text", NULL), *paras = json_gets(it, "paragraphs", NULL), *note = json_gets(it, "note", NULL);
+        long pa = 0, pb = 0; int have_rows = !strcmp(scope, "paragraphs") && parse_rows(paras, &pa, &pb);
+        if (!strcmp(kind, "keep")) {                              /* protected text: always collected, whatever the scope of this revision */
+            if (!strcmp(scope, "text") && text && *text) {
+                size_t a = edit_offset(H.text, H.textlen, r1, c1), b = edit_offset(H.text, H.textlen, r2, c2), tl = strlen(text);
+                if (a != (size_t)-1 && b != (size_t)-1 && b > a && b - a >= tl && memcmp(H.text + a, text, tl) == 0) add_keep(id, a, tl);
+                else for (size_t p = 0; p + tl <= H.textlen; p++) if (memcmp(H.text + p, text, tl) == 0) add_keep(id, p, tl);   /* it moved: protect every place it occurs */
+            } else if (have_rows) {
+                size_t a = edit_offset(H.text, H.textlen, pa, 1), b = edit_offset(H.text, H.textlen, pb + 1, 1);
+                if (a != (size_t)-1) add_keep(id, a, (b == (size_t)-1 ? H.textlen : b) - a);
+            } else continue;                                      /* a keep on the whole file protects nothing in particular */
+        }
+        int is_keep = !strcmp(kind, "keep");                       /* keeps are always sent, so the model knows what to leave alone */
+        int in_scope = 1;
+        if (is_keep) in_scope = 1;
+        else if (only) in_scope = (id == only);
+        else if (ranged) {
+            if (!strcmp(scope, "text")) { in_scope = (r1 > R1 || (r1 == R1 && c1 >= C1)) && (r2 < R2 || (r2 == R2 && c2 <= C2)); }
+            else if (have_rows) in_scope = pa >= R1 && pb <= Rlast;
+            else in_scope = 0;
+        }
+        if (!in_scope) continue;
+        if (annjson->len > 1) sb_putc(annjson, ',');
+        sb_printf(annjson, "{\"id\":%ld,\"kind\":", id); json_put_string(annjson, kind, strlen(kind));
+        if (!strcmp(scope, "text") && text) { sb_printf(annjson, ",\"where\":\"line %ld\",\"text\":", r1); json_put_string(annjson, text, strlen(text)); }
+        else if (have_rows) {
+            size_t a = edit_offset(H.text, H.textlen, pa, 1), b = edit_offset(H.text, H.textlen, pb + 1, 1);
+            if (a == (size_t)-1) a = 0;
+            if (b == (size_t)-1) b = H.textlen;
+            size_t tl = b > a ? b - a : 0, cap = tl > 8000 ? 8000 : tl; while (cap && (H.text[a + cap - 1] & 0xC0) == 0x80 && cap < tl) cap--;
+            sb_printf(annjson, ",\"where\":\"lines %ld-%ld\",\"text\":", pa, pb); json_put_string(annjson, H.text + a, cap);
+        } else sb_puts(annjson, ",\"where\":\"the whole document\",\"text\":null");
+        sb_puts(annjson, ",\"note\":"); json_put_string(annjson, note ? note : "", note ? strlen(note) : 0); sb_putc(annjson, '}');
+        if (!is_keep) { RV.ann = xrealloc(RV.ann, (RV.nann + 1) * sizeof *RV.ann); RV.ann[RV.nann++] = id; }
+    }
+    sb_putc(annjson, ']');
+    json_free(arr);
+    return NULL;
+}
+
+static void revise_command(const jv *v, sb_t *r) {
+    if (!H.path) { put_result(r, "no file: the text was not opened from a file, so it has no notes"); return; }
+    if (g_job.active || RV.state == RV_RUNNING) { put_result(r, "a revision is already running"); return; }
+    if (RV.state == RV_READY) { put_result(r, "there is a review waiting: finish it (Enter) or cancel it (Esc) first"); return; }
+    rv_clear();
+    RV.base = xstrndup(H.text, H.textlen); RV.baselen = H.textlen; RV.base_dirty = is_dirty();
+    const char *which = json_gets(v, "backend", NULL); if (!which || !*which) which = g_backend[0] ? g_backend : getenv("WINLESS_BACKEND");
+    if (!which || !*which) which = "claude";
+    snprintf(RV.backend, sizeof RV.backend, "%s", which);
+    snprintf(RV.scope, sizeof RV.scope, "%s", json_get(v, "id") ? "note" : json_get(v, "r1") ? "selection" : "file");
+    sb_t annjson; sb_init(&annjson);
+    const char *err = rv_collect(v, &annjson);
+    if (err) { sb_free(&annjson); rv_clear(); put_result(r, err); return; }
+    if (RV.nann == 0) { sb_free(&annjson); rv_clear(); put_result(r, "no open notes to revise (mark text with n or s first)"); return; }
+    sb_t user; sb_init(&user); llm_user_message(&user, H.text, H.textlen, annjson.s); sb_free(&annjson);
+    const char *cmd = getenv("WINLESS_LLM"); sb_t reqjson; sb_init(&reqjson);
+    char **argv = NULL; char *shargv[4]; char *const *runargv = NULL; const char *input = NULL; size_t inlen = 0;
+    if (cmd && *cmd) {                                            /* any command: the request as JSON on stdin, the reply on stdout */
+        snprintf(RV.backend, sizeof RV.backend, "custom");
+        llm_request_json(&reqjson, llm_system_prompt(), user.s, user.len, getenv("WINLESS_MODEL"));
+        shargv[0] = "/bin/sh"; shargv[1] = "-c"; shargv[2] = (char *)cmd; shargv[3] = NULL; runargv = shargv; input = reqjson.s; inlen = reqjson.len;
+    } else if (!strcmp(RV.backend, "claude")) {
+        argv = llm_claude_argv(llm_system_prompt(), getenv("WINLESS_MODEL"), getenv("WINLESS_EFFORT")); runargv = argv; input = user.s; inlen = user.len;
+    } else if (!strcmp(RV.backend, "api")) {
+        sb_free(&user); sb_free(&reqjson); rv_clear(); put_result(r, "the api backend is not built yet: use the claude backend (:set backend claude)"); return;
+    } else { sb_free(&user); sb_free(&reqjson); rv_clear(); put_result(r, "the backend must be claude or api"); return; }
+    const char *tmo = getenv("WINLESS_LLM_TIMEOUT"); double timeout = tmo && atof(tmo) > 0 ? atof(tmo) : 900;
+    err = job_start(runargv, input, inlen, timeout);
+    llm_free_argv(argv); sb_free(&user); sb_free(&reqjson);
+    if (err) { rv_clear(); put_result(r, err); return; }
+    RV.state = RV_RUNNING; RV.started = now_monotonic();
+    tell_pages_review();
+    sb_printf(r, "{\"ok\":true,\"started\":true,\"notes\":%zu,\"backend\":\"%s\"}", RV.nann, RV.backend);
+}
+
+/* ---- the review ---- */
+static const char *decision_name(int d) { return d == 1 ? "accepted" : d == 2 ? "rejected" : "pending"; }
+static void rv_counts(long *a, long *rj, long *p) {
+    *a = *rj = *p = 0;
+    for (size_t g = 0; g < RV.nisl; g++) { if (RV.decision[g] == 1) (*a)++; else if (RV.decision[g] == 2) (*rj)++; else (*p)++; }
+}
+static void review_status_json(sb_t *r) {
+    const char *st = RV.state == RV_RUNNING ? "running" : RV.state == RV_READY ? "ready" : RV.state == RV_ERROR ? "error" : "none";
+    sb_printf(r, "{\"ok\":true,\"state\":\"%s\",\"backend\":\"%s\",\"scope\":\"%s\"", st, RV.backend, RV.scope);
+    sb_printf(r, ",\"elapsed\":%.1f,\"dirty\":%s", RV.state == RV_NONE ? 0.0 : now_monotonic() - RV.started, RV.base_dirty ? "true" : "false");
+    sb_puts(r, ",\"error\":"); if (RV.error) json_put_string(r, RV.error, strlen(RV.error)); else sb_puts(r, "null");
+    sb_puts(r, ",\"raw\":"); if (RV.raw) json_put_string(r, RV.raw, strlen(RV.raw)); else sb_puts(r, "null");
+    long a, rj, p; rv_counts(&a, &rj, &p);
+    sb_printf(r, ",\"notes\":%zu,\"accepted\":%ld,\"rejected\":%ld,\"pending\":%ld,\"islands\":[", RV.nann, a, rj, p);
+    for (size_t g = 0; g < RV.nisl; g++) {
+        const island *is = &RV.isl[g];
+        if (g) sb_putc(r, ',');
+        sb_printf(r, "{\"n\":%zu,\"r1\":%ld,\"r2\":%ld,\"decision\":\"%s\",\"custom\":%s,\"old\":", g + 1, is->r1, is->r2, decision_name(RV.decision[g]), RV.custom[g] ? "true" : "false");
+        json_put_string(r, is->old_text, strlen(is->old_text));
+        const char *nt = RV.custom[g] ? RV.custom[g] : is->new_text; sb_puts(r, ",\"new\":"); json_put_string(r, nt, strlen(nt));
+        sb_puts(r, ",\"edits\":[");
+        for (size_t k = 0; k < is->nidx; k++) {
+            const edit_item *e = &RV.edits[is->idx[k]];
+            if (k) sb_putc(r, ',');
+            sb_printf(r, "{\"annotation\":%ld,\"also\":%s,\"why\":", e->annotation, e->also ? "true" : "false"); json_put_string(r, e->why, strlen(e->why)); sb_putc(r, '}');
+        }
+        sb_puts(r, "]}");
+    }
+    sb_puts(r, "],\"problems\":[");
+    int first = 1;
+    for (size_t i = 0; i < RV.nedits; i++) {
+        const edit_item *e = &RV.edits[i]; if (e->ok) continue;
+        if (!first) sb_putc(r, ',');
+        first = 0;
+        size_t fl = strlen(e->find); if (fl > 120) fl = 120;
+        sb_printf(r, "{\"annotation\":%ld,\"find\":", e->annotation); json_put_string(r, e->find, fl);
+        sb_puts(r, ",\"problem\":"); json_put_string(r, e->problem ? e->problem : "", e->problem ? strlen(e->problem) : 0); sb_putc(r, '}');
+    }
+    sb_puts(r, "]}");
+}
+
+/* ---- git: commit the file only when it was clean beforehand, so the author's own uncommitted edits are never swept in ---- */
+static int git_ok(const char *cmd, sb_t *out) {
+    char *cwd = NULL; if (H.path) { char *sl = strrchr(H.path, '/'); if (sl && sl != H.path) cwd = xstrndup(H.path, (size_t)(sl - H.path)); }
+    sb_t o, e; sb_init(&o); sb_init(&e); int st = 1;
+    const char *err = run_filter(cmd, cwd, "", 0, 60, &o, &e, &st);
+    free(cwd);
+    int ok = !err && st == 0;
+    if (out) sb_put(out, o.s, o.len);
+    sb_free(&o); sb_free(&e);
+    return ok;
+}
+static int git_file_is_clean(void) {                              /* in a repository, tracked, and no uncommitted changes */
+    return git_ok("git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git ls-files --error-unmatch -- \"$WINLESS_FILE\" >/dev/null 2>&1 "
+                  "&& test -z \"$(git status --porcelain -- \"$WINLESS_FILE\")\"", NULL);
+}
+
+static void review_finish(sb_t *r) {
+    if (RV.state != RV_READY) { put_result(r, "there is no review to finish"); return; }
+    if (RV.baselen != H.textlen || memcmp(RV.base, H.text, H.textlen) != 0) {
+        put_result(r, "the text changed while the model was working: cancel this review (Esc) and revise again"); return;
+    }
+    long acc, rej, pend; rv_counts(&acc, &rej, &pend);
+    sb_t out; sb_init(&out); size_t pos = 0;
+    for (size_t g = 0; g < RV.nisl; g++) {
+        if (RV.decision[g] != 1) continue;
+        sb_put(&out, RV.base + pos, RV.isl[g].off - pos);
+        const char *nt = RV.custom[g] ? RV.custom[g] : RV.isl[g].new_text; sb_puts(&out, nt);
+        pos = RV.isl[g].off + RV.isl[g].len;
+    }
+    sb_put(&out, RV.base + pos, RV.baselen - pos);
+    int changed = acc > 0 && (out.len != RV.baselen || memcmp(out.s, RV.base, RV.baselen) != 0);
+    if (changed) {
+        long er, ec; edit_endpos(1, 1, H.text, H.textlen, &er, &ec);
+        const char *e = apply_edit(1, 1, er, ec, out.s, out.len);   /* ONE undoable edit */
+        if (e) { sb_free(&out); put_result(r, e); return; }
+    }
+    sb_free(&out);
+    /* a note is finished when its own changes were all accepted */
+    sb_t done_ids; sb_init(&done_ids);
+    for (size_t a = 0; a < RV.nann; a++) {
+        long id = RV.ann[a]; int total = 0, taken = 0, bad = 0, primary = 0;
+        for (size_t i = 0; i < RV.nedits; i++) if (RV.edits[i].annotation == id && !RV.edits[i].also) primary = 1;
+        for (size_t i = 0; i < RV.nedits; i++) {
+            const edit_item *e = &RV.edits[i]; if (e->annotation != id || (primary && e->also)) continue;
+            total++;
+            if (!e->ok) { bad = 1; continue; }
+            for (size_t g = 0; g < RV.nisl; g++) for (size_t k = 0; k < RV.isl[g].nidx; k++) if (RV.isl[g].idx[k] == i) { if (RV.decision[g] == 1) taken++; else bad = 1; }
+        }
+        if (total > 0 && taken > 0 && !bad && store_set_status(id, "done") == NULL) sb_printf(&done_ids, "%s%ld", done_ids.len ? "," : "", id);
+    }
+    /* write and commit: only if the text had no unsaved edits of the author's own */
+    int written = 0; char commit[24] = ""; char note[240] = "";
+    if (!changed) snprintf(note, sizeof note, "nothing was accepted");
+    else if (RV.base_dirty) snprintf(note, sizeof note, "the text had unsaved edits, so the result is left unsaved (write it with :w)");
+    else {
+        int clean = git_file_is_clean();
+        const char *werr = do_write(0);
+        if (werr) snprintf(note, sizeof note, "not written: %.180s", werr);
+        else {
+            written = 1;
+            if (!clean) snprintf(note, sizeof note, "written; not committed (not a git file, or it had uncommitted changes)");
+            else {
+                const char *slash = strrchr(H.path, '/'); char msg[300];
+                snprintf(msg, sizeof msg, "winless: revision of %s (%ld of %zu changes accepted)", slash ? slash + 1 : H.path, acc, RV.nisl);
+                setenv("WINLESS_MSG", msg, 1);
+                int ok = git_ok("git add -- \"$WINLESS_FILE\" && git commit -q -m \"$WINLESS_MSG\" -- \"$WINLESS_FILE\"", NULL);
+                unsetenv("WINLESS_MSG");
+                if (!ok) snprintf(note, sizeof note, "written; the git commit failed");
+                else { sb_t h; sb_init(&h); git_ok("git rev-parse --short HEAD", &h); while (h.len && (h.s[h.len - 1] == '\n' || h.s[h.len - 1] == ' ')) h.s[--h.len] = 0; snprintf(commit, sizeof commit, "%s", h.s); sb_free(&h); snprintf(note, sizeof note, "written and committed"); }
+            }
+        }
+    }
+    store_add_review(H.path, RV.backend, getenv("WINLESS_MODEL"), RV.scope, done_ids.s, acc, rej, pend, written, commit[0] ? commit : NULL, note);
+    sb_printf(r, "{\"ok\":true,\"accepted\":%ld,\"rejected\":%ld,\"pending\":%ld,\"changed\":%s,\"written\":%s,\"commit\":", acc, rej, pend, changed ? "true" : "false", written ? "true" : "false");
+    if (commit[0]) json_put_string(r, commit, strlen(commit)); else sb_puts(r, "null");
+    sb_puts(r, ",\"note\":"); json_put_string(r, note, strlen(note)); sb_putc(r, '}');
+    sb_free(&done_ids);
+    rv_clear();
+    tell_pages_review();
+    const char *m = "{\"cmd\":\"reload\"}"; broadcast(m, strlen(m));
+}
+
+static void review_command(const jv *v, sb_t *r) {
+    const char *act = json_gets(v, "action", NULL); if (!act) act = "status";
+    long n = (long)json_getnum(v, "n", 0);
+    if (!strcmp(act, "status")) { review_status_json(r); return; }
+    if (!strcmp(act, "cancel")) { job_kill(); rv_clear(); tell_pages_review(); put_result(r, NULL); return; }
+    if (RV.state != RV_READY) { put_result(r, RV.state == RV_RUNNING ? "the model is still working" : "there is no review"); return; }
+    if (!strcmp(act, "finish")) { review_finish(r); return; }
+    if (!strcmp(act, "accept-all") || !strcmp(act, "reject-all")) { for (size_t g = 0; g < RV.nisl; g++) RV.decision[g] = act[0] == 'a' ? 1 : 2; tell_pages_review(); put_result(r, NULL); return; }
+    if (n < 1 || (size_t)n > RV.nisl) { put_result(r, "no such change"); return; }
+    size_t g = (size_t)n - 1;
+    if (!strcmp(act, "accept")) RV.decision[g] = 1;
+    else if (!strcmp(act, "reject")) RV.decision[g] = 2;
+    else if (!strcmp(act, "edit")) {                              /* the author's own wording for this change */
+        const char *t = json_gets(v, "text", NULL); if (!t) { put_result(r, "no text given"); return; }
+        free(RV.custom[g]); RV.custom[g] = xstrdup(t);
+    } else { put_result(r, "unknown review action"); return; }
+    tell_pages_review();
+    put_result(r, NULL);
 }
 
 static void edit_command(const char *cmd, const jv *v, sb_t *r) {
     if (!strcmp(cmd, "edit")) {
         size_t tl = 0; const char *tx = json_gets(v, "text", &tl);
         put_result(r, apply_edit((long)json_getnum(v, "r1", 0), (long)json_getnum(v, "c1", 0), (long)json_getnum(v, "r2", 0), (long)json_getnum(v, "c2", 0), tx, tl));
+    } else if (!strcmp(cmd, "revise")) {
+        revise_command(v, r);
+    } else if (!strcmp(cmd, "review")) {
+        review_command(v, r);
+    } else if (!strcmp(cmd, "backend")) {
+        const char *b = json_gets(v, "value", NULL);
+        if (b && (!strcmp(b, "claude") || !strcmp(b, "api"))) { snprintf(g_backend, sizeof g_backend, "%s", b); put_result(r, NULL); }
+        else put_result(r, "the backend must be claude or api");
     } else if (!strcmp(cmd, "filter")) {
         filter_command(v, r);
     } else if (!strcmp(cmd, "annotate")) {
@@ -586,6 +976,7 @@ static void h_cmd(conn *c, const char *body, size_t blen) {
         sb_putc(&res, '}'); json_free(v); respond_json(c, &res); return;
     }
     if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "history") || !strcmp(cmd, "revert")
+        || !strcmp(cmd, "revise") || !strcmp(cmd, "review") || !strcmp(cmd, "backend")
         || !strcmp(cmd, "filter") || !strcmp(cmd, "annotate") || !strcmp(cmd, "annotations") || !strcmp(cmd, "unannotate")) {
         sb_t res; sb_init(&res); edit_command(cmd, v, &res); json_free(v); respond_json(c, &res); return;
     }
@@ -737,7 +1128,7 @@ int server_run(int port, double idle_secs) {
             pf[i + 1].events = (short)((conns[i]->state != ST_CLOSING ? POLLIN : 0) | (conns[i]->outpos < conns[i]->out.len ? POLLOUT : 0));
         }
         size_t n_polled = nconns;                                   /* only these have a pollfd slot */
-        int rc = poll(pf, (nfds_t)(nconns + 1), 500);
+        int rc = poll(pf, (nfds_t)(nconns + 1), g_job.active ? 100 : 500);
         if (rc < 0 && errno != EINTR) { free(pf); break; }
         if (rc > 0 && (pf[0].revents & POLLIN)) {
             int fd;
@@ -758,8 +1149,9 @@ int server_run(int port, double idle_secs) {
             if (c->fd >= 0) flush_conn(c);
         }
         free(pf);
+        job_pump();
         double now = now_monotonic();
-        if (sse_count() > 0) last_busy = now;
+        if (sse_count() > 0 || g_job.active) last_busy = now;
         else if (idle_secs > 0 && now - last_busy > idle_secs) g_stop = 1;       /* its window is gone: unsaved edits go with it */
         if (g_quit_at > 0 && now >= g_quit_at) g_stop = 1;
         for (size_t i = 0; i < nconns; i++) {
@@ -772,6 +1164,7 @@ int server_run(int port, double idle_secs) {
     }
     for (size_t i = 0; i < nconns; i++) flush_conn(conns[i]);       /* let the reply to a `stop` command out */
     for (size_t i = 0; i < nconns; i++) conn_close(conns[i]);
+    job_kill();
     compact();
     close(ls);
     registry_remove(port);

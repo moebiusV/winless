@@ -37,3 +37,7 @@ back (a revert can itself be reverted).  Unsaved edits are never kept: quitting 
 Annotations and filters: in visual mode `n` saves a note on the selection (in ~/.local/share/winless/winless.db; :annotations lists them,
 ]a / [a visit them); `:'<,'>!sort`, `:'<>!tr a-z A-Z`, `:%!fmt` replace text with the output of a shell command (one undo step).
 Needs libsqlite3 (libsqlite3-dev).
+
+Revising: mark text while reading (visual mode: n note, s slop, K keep), then `gr` asks a model (claude -p) to address the open notes;
+review the proposed changes in place (n N next, y accept, q reject, c your own wording, Enter finish, Esc cancel).  Accepted changes
+are one undo step, and the file is written and committed if it was clean.  `winless backend claude|api` switches the model backend.

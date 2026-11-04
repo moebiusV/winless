@@ -199,6 +199,135 @@ static void t_edit_replace_and_endpos(void) {
     edit_endpos(2, 3, "a\n", 2, &r2, &c2); CHECK_INT(r2, 3); CHECK_INT(c2, 1);
 }
 
+/* ---- edits.c: the model's proposed edits ---- */
+static edit_item *parse_ok(const char *json, size_t *n) {
+    edit_item *e; const char *err = edits_parse(json, strlen(json), &e, n);
+    if (err) FAIL("parse failed: %s", err);
+    return e;
+}
+
+static void t_edits_parse(void) {
+    size_t n; edit_item *e;
+    e = parse_ok("{\"edits\":[{\"annotation\":7,\"find\":\"very good\",\"replace\":\"good\",\"why\":\"filler\"},"
+                 "{\"find\":\"a\",\"replace\":\"\",\"also\":true}]}", &n);
+    CHECK_INT(n, 2);
+    CHECK_INT(e[0].annotation, 7); CHECK_STR(e[0].find, "very good"); CHECK_STR(e[0].replace, "good"); CHECK_STR(e[0].why, "filler"); CHECK_INT(e[0].also, 0);
+    CHECK_INT(e[1].annotation, 0); CHECK_STR(e[1].replace, ""); CHECK_INT(e[1].also, 1);
+    edits_free(e, n);
+    e = parse_ok("Here are the edits:\n```json\n{\"edits\": [{\"annotation\": 1, \"find\": \"x\", \"replace\": \"y\"}]}\n```\nDone.", &n);   /* prose and a fence around it */
+    CHECK_INT(n, 1); CHECK_STR(e[0].find, "x"); edits_free(e, n);
+    e = parse_ok("[{\"find\":\"x\",\"replace\":\"y\"}]", &n); CHECK_INT(n, 1); edits_free(e, n);                              /* a bare list is fine too */
+    e = parse_ok("{\"edits\":[]}", &n); CHECK_INT(n, 0); edits_free(e, n);                                                  /* nothing to change is an answer */
+    e = parse_ok("{\"edits\":[{\"find\":\"caf\\u00e9\",\"replace\":\"cafe\\n\"}]}", &n);
+    CHECK_STR(e[0].find, "caf\xC3\xA9"); CHECK_STR(e[0].replace, "cafe\n"); edits_free(e, n);
+
+    edit_item *bad; size_t bn;
+    CHECK(edits_parse("no json here", 12, &bad, &bn) != NULL);
+    CHECK(edits_parse("{\"edits\": [oops", 15, &bad, &bn) != NULL);
+    CHECK(edits_parse("{\"other\": 1}", 12, &bad, &bn) != NULL);                                                            /* no edits list */
+    CHECK(edits_parse("{\"edits\":[{\"find\":\"x\"}]}", 24, &bad, &bn) != NULL);                                           /* an edit with no replace */
+}
+
+static void t_edits_verify(void) {
+    const char *text = "The cat sat. The dog sat. A very good day, a very good night.\nSecond line: keep me.\n";
+    size_t tl = strlen(text), n; edit_item *e;
+    e = parse_ok("{\"edits\":["
+        "{\"annotation\":1,\"find\":\"The cat\",\"replace\":\"A cat\"},"            /* ok */
+        "{\"annotation\":2,\"find\":\"nowhere\",\"replace\":\"x\"},"                 /* not found */
+        "{\"annotation\":3,\"find\":\" sat.\",\"replace\":\" ran.\"},"                /* twice */
+        "{\"annotation\":4,\"find\":\"\",\"replace\":\"x\"},"                         /* names nothing */
+        "{\"annotation\":5,\"find\":\"dog\",\"replace\":\"dog\"},"                    /* identical */
+        "{\"annotation\":6,\"find\":\"keep me\",\"replace\":\"drop me\"},"            /* touches a keep span */
+        "{\"annotation\":7,\"find\":\"The cat sat\",\"replace\":\"It sat\"}"          /* overlaps the first */
+        "]}", &n);
+    const char *kp = strstr(text, "keep me");
+    keep_span keep[1] = { { 99, (size_t)(kp - text), 7 } };
+    size_t ok = edits_verify(text, tl, e, n, keep, 1);
+    CHECK_INT(ok, 1);
+    CHECK_INT(e[0].ok, 1); CHECK_INT(e[0].off, 0); CHECK_INT(e[0].len, 7);
+    CHECK_CONTAINS(e[1].problem, "not found"); CHECK_CONTAINS(e[2].problem, "2 times"); CHECK_CONTAINS(e[3].problem, "no text");
+    CHECK_CONTAINS(e[4].problem, "identical"); CHECK_CONTAINS(e[5].problem, "#99"); CHECK_CONTAINS(e[6].problem, "overlaps another");
+    CHECK_INT(e[1].ok + e[2].ok + e[3].ok + e[4].ok + e[5].ok + e[6].ok, 0);
+    edits_free(e, n);
+    e = parse_ok("{\"edits\":[{\"find\":\"very good day\",\"replace\":\"fine day\"}]}", &n);       /* found once: the other 'very good' is followed by 'night' */
+    CHECK_INT(edits_verify(text, tl, e, n, NULL, 0), 1); edits_free(e, n);
+    e = parse_ok("{\"edits\":[{\"find\":\"very good\",\"replace\":\"fine\"}]}", &n);               /* twice: ambiguous, never guessed at */
+    CHECK_INT(edits_verify(text, tl, e, n, NULL, 0), 0); CHECK_CONTAINS(e[0].problem, "ambiguous"); edits_free(e, n);
+}
+
+static void t_edits_islands_and_apply(void) {
+    const char *text = "First line is plain.\nSecond has very very bad and also quite poor words.\nThird line stays.\nFourth: caf\xC3\xA9 au lait.\n";
+    size_t tl = strlen(text), n; edit_item *e;
+    e = parse_ok("{\"edits\":["
+        "{\"annotation\":1,\"find\":\"very very bad\",\"replace\":\"bad\"},"
+        "{\"annotation\":2,\"find\":\"quite poor\",\"replace\":\"poor\"},"                    /* same line as the first: one island */
+        "{\"annotation\":3,\"find\":\"caf\xC3\xA9 au lait\",\"replace\":\"tea\"}"            /* a multibyte line on its own */
+        "]}", &n);
+    CHECK_INT(edits_verify(text, tl, e, n, NULL, 0), 3);
+    island *is; size_t ni = edits_islands(text, tl, e, n, &is);
+    CHECK_INT(ni, 2);
+    CHECK_INT(is[0].r1, 2); CHECK_INT(is[0].r2, 2); CHECK_INT(is[0].nidx, 2);
+    CHECK_STR(is[0].old_text, "Second has very very bad and also quite poor words.");
+    CHECK_STR(is[0].new_text, "Second has bad and also poor words.");
+    CHECK_INT(is[1].r1, 4); CHECK_INT(is[1].nidx, 1);
+    CHECK_STR(is[1].old_text, "Fourth: caf\xC3\xA9 au lait."); CHECK_STR(is[1].new_text, "Fourth: tea.");
+
+    size_t out; int accept[2];
+    accept[0] = 1; accept[1] = 1; char *all = edits_apply(text, tl, e, is, ni, accept, &out);
+    CHECK_STR(all, "First line is plain.\nSecond has bad and also poor words.\nThird line stays.\nFourth: tea.\n"); free(all);
+    accept[0] = 0; accept[1] = 1; char *only2 = edits_apply(text, tl, e, is, ni, accept, &out);                 /* reject the first island */
+    CHECK_STR(only2, "First line is plain.\nSecond has very very bad and also quite poor words.\nThird line stays.\nFourth: tea.\n"); free(only2);
+    accept[0] = 1; accept[1] = 0; char *only1 = edits_apply(text, tl, e, is, ni, accept, &out);
+    CHECK_STR(only1, "First line is plain.\nSecond has bad and also poor words.\nThird line stays.\nFourth: caf\xC3\xA9 au lait.\n"); free(only1);
+    accept[0] = 0; accept[1] = 0; char *none = edits_apply(text, tl, e, is, ni, accept, &out);                  /* nothing accepted: the text is untouched */
+    CHECK_STR(none, text); CHECK_INT(out, tl); free(none);
+    islands_free(is, ni); edits_free(e, n);
+
+    /* a find that spans a line break covers both lines; the result is still correct */
+    e = parse_ok("{\"edits\":[{\"find\":\"plain.\\nSecond\",\"replace\":\"plain. Second\"}]}", &n);
+    CHECK_INT(edits_verify(text, tl, e, n, NULL, 0), 1);
+    ni = edits_islands(text, tl, e, n, &is); CHECK_INT(ni, 1); CHECK_INT(is[0].r1, 1); CHECK_INT(is[0].r2, 2);
+    CHECK_STR(is[0].new_text, "First line is plain. Second has very very bad and also quite poor words.");
+    accept[0] = 1; char *joined = edits_apply(text, tl, e, is, ni, accept, &out);
+    CHECK_CONTAINS(joined, "plain. Second has"); free(joined);
+    islands_free(is, ni); edits_free(e, n);
+
+    /* an edit that deletes (empty replacement) and one at the very start and very end of the text */
+    e = parse_ok("{\"edits\":[{\"find\":\"First\",\"replace\":\"1st\"},{\"find\":\"au lait.\",\"replace\":\"\"}]}", &n);
+    CHECK_INT(edits_verify(text, tl, e, n, NULL, 0), 2);
+    ni = edits_islands(text, tl, e, n, &is); CHECK_INT(ni, 2);
+    accept[0] = 1; accept[1] = 1; char *ends = edits_apply(text, tl, e, is, ni, accept, &out);
+    CHECK_STR(ends, "1st line is plain.\nSecond has very very bad and also quite poor words.\nThird line stays.\nFourth: caf\xC3\xA9 \n"); free(ends);
+    islands_free(is, ni); edits_free(e, n);
+}
+
+/* ---- llm.c ---- */
+static void t_llm_prompt_and_command(void) {
+    const char *sys = llm_system_prompt();
+    CHECK_CONTAINS(sys, "slop"); CHECK_CONTAINS(sys, "keep"); CHECK_CONTAINS(sys, "note");                       /* the three kinds are explained */
+    CHECK_CONTAINS(sys, "exactly once"); CHECK_CONTAINS(sys, "{\"edits\":[]}"); CHECK_CONTAINS(sys, "Do not add facts");
+    sb_t u; sb_init(&u);
+    llm_user_message(&u, "Line one.\nLine two.", 19, "[{\"id\":1,\"kind\":\"slop\"}]");
+    CHECK_CONTAINS(u.s, "<document>\nLine one.\nLine two.\n</document>");                                         /* a final newline is added if missing */
+    CHECK_CONTAINS(u.s, "<annotations>\n[{\"id\":1,\"kind\":\"slop\"}]\n</annotations>");
+    sb_t rq; sb_init(&rq); llm_request_json(&rq, "SYS \"q\"", u.s, u.len, "some-model");
+    jv *j = json_parse(rq.s, rq.len); CHECK(j != NULL);
+    CHECK_STR(json_gets(j, "system", NULL), "SYS \"q\""); CHECK_STR(json_gets(j, "user", NULL), u.s); CHECK_STR(json_gets(j, "model", NULL), "some-model");
+    json_free(j); sb_free(&rq); sb_free(&u);
+
+    unsetenv("WINLESS_CLAUDE");
+    char **a = llm_claude_argv("THE PROMPT", NULL, NULL);
+    CHECK_STR(a[0], "claude"); CHECK_STR(a[1], "-p");
+    CHECK_STR(a[2], "--tools"); CHECK_STR(a[3], "");                                                              /* no tools: it can only answer */
+    CHECK_STR(a[4], "--no-session-persistence");                                                                  /* nothing kept afterwards */
+    CHECK_STR(a[5], "--system-prompt"); CHECK_STR(a[6], "THE PROMPT"); CHECK(a[7] == NULL);
+    llm_free_argv(a);
+    setenv("WINLESS_CLAUDE", "/opt/fake-claude", 1);
+    a = llm_claude_argv("P", "claude-opus-5-5", "high");
+    CHECK_STR(a[0], "/opt/fake-claude"); CHECK_STR(a[7], "--model"); CHECK_STR(a[8], "claude-opus-5-5"); CHECK_STR(a[9], "--effort"); CHECK_STR(a[10], "high"); CHECK(a[11] == NULL);
+    llm_free_argv(a); unsetenv("WINLESS_CLAUDE");
+}
+
 int main(void) {
     testlib_init_noserver();
     static const testcase tests[] = {
@@ -217,6 +346,10 @@ int main(void) {
         { "file_reading", t_file_reading, 0 },
         { "edit_offset", t_edit_offset, 0 },
         { "edit_replace_and_endpos", t_edit_replace_and_endpos, 0 },
+        { "edits_parse", t_edits_parse, 0 },
+        { "edits_verify", t_edits_verify, 0 },
+        { "edits_islands_and_apply", t_edits_islands_and_apply, 0 },
+        { "llm_prompt_and_command", t_llm_prompt_and_command, 0 },
     };
     return run_tests(tests, sizeof tests / sizeof *tests) ? 1 : 0;
 }

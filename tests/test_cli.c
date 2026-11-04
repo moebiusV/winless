@@ -550,6 +550,51 @@ static void t_annotations_by_scope(void) {
     r = CLI("unannotate", "999999"); CHECK_INT(r.code, 1); free(r.out);
 }
 
+static void t_annotation_kinds(void) {
+    char *f = tmp_write("kinds.txt", "alpha beta gamma\n\ndelta epsilon\n", 31);
+    expect_ok(CLI("open", f, "--no-window"));
+    expect_ok(CLI("annotate", "--kind", "slop", "1", "1", "1", "6"));                      /* slop and keep need no words */
+    expect_ok(CLI("annotate", "--kind", "keep", "1", "7", "1", "11", "this is good"));
+    expect_ok(CLI("annotate", "--kind", "slop", "3", "1", "3", "6", "too flowery"));
+    expect_ok(CLI("annotate", "1", "12", "1", "17", "cut this"));                           /* the default kind is note */
+    run_t r = CLI("annotate", "1", "12", "1", "17"); CHECK_INT(r.code, 1); free(r.out);      /* a plain note needs its words */
+    r = CLI("annotate", "--kind", "nonsense", "1", "1", "1", "6", "x"); CHECK_INT(r.code, 1); free(r.out);
+
+    jv *l = annotation_list(0);
+    const jv *items = json_get(l, "items");
+    int slop = 0, keep = 0, note = 0;
+    for (size_t i = 0; items && i < items->n; i++) {
+        const jv *it = items->items[i];
+        CHECK_STR(json_gets(it, "status", NULL), "open");
+        const char *k = json_gets(it, "kind", NULL);
+        if (!strcmp(k, "slop")) slop++; else if (!strcmp(k, "keep")) keep++; else if (!strcmp(k, "note")) note++;
+    }
+    CHECK_INT(slop, 2); CHECK_INT(keep, 1); CHECK_INT(note, 1);
+    const jv *one = find_note(l, "this is good"); CHECK(one != NULL); CHECK_STR(json_gets(one, "kind", NULL), "keep"); CHECK_STR(json_gets(one, "text", NULL), "beta");
+    json_free(l);
+    run_t ls = CLI("annotations"); CHECK_CONTAINS(ls.out, "slop"); CHECK_CONTAINS(ls.out, "keep"); CHECK_CONTAINS(ls.out, "note"); free(ls.out);
+}
+
+static void t_old_annotation_database_is_upgraded(void) {
+    if (access("/usr/bin/sqlite3", X_OK) != 0 && access("/bin/sqlite3", X_OK) != 0) return;       /* needs the sqlite3 tool to make the old file */
+    char dir[900], cmd[4096];
+    snprintf(dir, sizeof dir, "%s/home/.local/share/winless", tmp_dir());
+    snprintf(cmd, sizeof cmd, "rm -f '%s/winless.db' && sqlite3 '%s/winless.db' \"CREATE TABLE annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+             "file TEXT NOT NULL, created TEXT NOT NULL, row_beg INTEGER, col_beg INTEGER, row_end INTEGER, col_end INTEGER, "
+             "scope TEXT NOT NULL CHECK (scope IN ('text','paragraphs','file')), selected_text TEXT, paragraphs TEXT, note TEXT NOT NULL, "
+             "deleted INTEGER NOT NULL DEFAULT 0); INSERT INTO annotations (file, created, row_beg, col_beg, row_end, col_end, scope, selected_text, note) "
+             "VALUES ('/old/file.md', '2026-01-01T00:00:00Z', 1, 1, 1, 4, 'text', 'word', 'an old note');\"", dir, dir);
+    CHECK_INT(system(cmd), 0);
+    char *f = tmp_write("up.txt", "word and more\n", 14);
+    expect_ok(CLI("open", f, "--no-window"));
+    jv *l = post_json("/cmd", "{\"cmd\":\"annotations\",\"all\":true}");
+    const jv *old = find_note(l, "an old note");
+    CHECK(old != NULL); CHECK_STR(json_gets(old, "kind", NULL), "note"); CHECK_STR(json_gets(old, "status", NULL), "open");     /* the old note survived, as an open note */
+    json_free(l);
+    expect_ok(CLI("annotate", "--kind", "slop", "1", "1", "1", "5"));                                                          /* and the upgraded database takes new kinds */
+    l = annotation_list(0); CHECK_INT(json_get(l, "items")->n, 1); json_free(l);
+}
+
 /* ---- filters ---- */
 static jv *filter_json(long r1, long c1, long r2, long c2, const char *command, int lines, double timeout) {
     sb_t b; sb_init(&b);
@@ -637,6 +682,8 @@ int main(void) {
         { "write_needs_a_file", t_write_needs_a_file, 1 },
         { "redo", t_redo, 1 },
         { "annotations_by_scope", t_annotations_by_scope, 1 },
+        { "annotation_kinds", t_annotation_kinds, 1 },
+        { "old_annotation_database_is_upgraded", t_old_annotation_database_is_upgraded, 1 },
         { "filters", t_filters, 1 },
         { "filters_with_big_input_and_output", t_filters_with_big_input_and_output, 1 },
         { "every_write_can_be_reverted", t_every_write_can_be_reverted, 1 },

@@ -9,3 +9,4 @@ winless-*/
 tests/test_unit
 tests/test_server
 tests/test_cli
+tests/test_revise

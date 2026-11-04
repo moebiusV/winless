@@ -221,7 +221,8 @@ static void usage(FILE *f) {
           "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop]\n"
           "  status [--json] [--text]     wait [--timeout S]     window [--windowed]   close\n"
           "  history | revert [N]    (every write keeps the old file; revert puts one back)\n"
-          "  annotate R1 C1 R2 C2 NOTE | --file NOTE    annotations [--all]    unannotate [--restore] ID\n"
+          "  annotate [--kind K] R1 C1 R2 C2 [NOTE] | --file    annotations [--all]    unannotate [--restore] ID\n"
+          "  revise [--id N | --range R1 C1 R2 C2] [--wait]   review status|accept N|reject N|edit N TEXT|finish|cancel   backend claude|api\n"
           "  filter R1 C1 R2 C2 [--lines] COMMAND       (replace a range with the output of a shell command)\n"
           "  windows   (list the open windows)    stop [--all] [--force]    serve | start      --version   --help\n"
           "Each open starts its own server and window; with several open, commands ask which (or use --port N).\n"
@@ -471,20 +472,23 @@ static jv *ask(int port, sb_t *b, const char *what) {         /* send a command,
     if (!j || !json_getbool(j, "ok", 0)) { const char *e = j ? json_gets(j, "error", NULL) : NULL; fprintf(stderr, "winless %s: %s\n", what, e ? e : "failed"); json_free(j); return NULL; }
     return j;
 }
-/* annotate R1 C1 R2 C2 NOTE   (rows and columns from 1, the end excluded -- as for edit)      annotate --file NOTE   (the whole file) */
+/* annotate [--kind note|slop|keep] R1 C1 R2 C2 [NOTE]   (rows and columns from 1, the end excluded -- as for edit)
+ * annotate [--kind K] --file [NOTE]                      (the whole file).  A note is needed only for kind note. */
 static int cmd_annotate(int port, int argc, char **argv) {
-    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"annotate\"");
-    const char *note;
-    if (argc == 2 && !strcmp(argv[0], "--file")) { sb_puts(&b, ",\"file\":true"); note = argv[1]; }
-    else if (argc == 5) {
+    const char *kind = "note";
+    while (argc >= 2 && !strcmp(argv[0], "--kind")) { kind = argv[1]; argc -= 2; argv += 2; }
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"annotate\""); jopt(&b, "kind", kind);
+    const char *note = "";
+    if (argc >= 1 && !strcmp(argv[0], "--file") && argc <= 2) { sb_puts(&b, ",\"file\":true"); if (argc == 2) note = argv[1]; }
+    else if (argc == 4 || argc == 5) {
         const char *names[4] = { "r1", "c1", "r2", "c2" };
         for (int i = 0; i < 4; i++) { jkey(&b, names[i]); json_put_number(&b, atof(argv[i])); }
-        note = argv[4];
-    } else { sb_free(&b); fprintf(stderr, "usage: winless annotate R1 C1 R2 C2 NOTE | annotate --file NOTE\n"); return 2; }
+        if (argc == 5) note = argv[4];
+    } else { sb_free(&b); fprintf(stderr, "usage: winless annotate [--kind note|slop|keep] R1 C1 R2 C2 [NOTE] | annotate [--kind K] --file [NOTE]\n"); return 2; }
     sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, note, strlen(note));
     jopt(&b, "note", clean.s); sb_free(&clean); sb_putc(&b, '}');
     jv *j = ask(port, &b, "annotate"); if (!j) return 1;
-    printf("note %.0f saved (%s)\n", json_getnum(j, "id", 0), json_gets(j, "scope", NULL)); json_free(j);
+    printf("%s %.0f saved (%s)\n", json_gets(j, "kind", NULL), json_getnum(j, "id", 0), json_gets(j, "scope", NULL)); json_free(j);
     return 0;
 }
 /* annotations [--all] [--deleted]: the notes on this file (or on every file) */
@@ -504,7 +508,8 @@ static int cmd_annotations(int port, int argc, char **argv) {
         if (scope && !strcmp(scope, "text")) snprintf(where, sizeof where, "%.0f:%.0f-%.0f:%.0f", json_getnum(it, "r1", 0), json_getnum(it, "c1", 0), json_getnum(it, "r2", 0), json_getnum(it, "c2", 0));
         else if (scope && !strcmp(scope, "paragraphs")) snprintf(where, sizeof where, "paragraphs %s", paras ? paras : "?");
         else snprintf(where, sizeof where, "whole file");
-        printf("#%.0f  %s%s  %s  %s\n", json_getnum(it, "id", 0), json_getbool(it, "deleted", 0) ? "[hidden] " : "", json_gets(it, "created", NULL), where, note ? note : "");
+        const char *kind = json_gets(it, "kind", NULL), *status = json_gets(it, "status", NULL);
+        printf("#%.0f  %s%s %s  %s  %s\n", json_getnum(it, "id", 0), json_getbool(it, "deleted", 0) ? "[hidden] " : "", kind ? kind : "note", status && strcmp(status, "open") ? status : "", where, note ? note : "");
         if (text) printf("      on: %s\n", text);
     }
     json_free(j);
@@ -533,6 +538,78 @@ static int cmd_filter(int port, int argc, char **argv) {
     if (i != argc - 1) { sb_free(&b); fprintf(stderr, "usage: winless filter R1 C1 R2 C2 [--lines] [--timeout S] COMMAND\n"); return 2; }
     jopt(&b, "command", argv[i]); sb_putc(&b, '}');
     jv *j = ask(port, &b, "filter"); if (!j) return 1; json_free(j);
+    return 0;
+}
+
+/* ---- revision: hand the open notes to a model, then review what it proposes ---- */
+static void print_review(const jv *j) {
+    const char *state = json_gets(j, "state", NULL);
+    printf("review: %s (%s, %.0f s) -- %.0f note(s); accepted %.0f, rejected %.0f, pending %.0f\n", state ? state : "?", json_gets(j, "backend", NULL),
+           json_getnum(j, "elapsed", 0), json_getnum(j, "notes", 0), json_getnum(j, "accepted", 0), json_getnum(j, "rejected", 0), json_getnum(j, "pending", 0));
+    const char *err = json_gets(j, "error", NULL); if (err) printf("  error: %s\n", err);
+    const jv *isl = json_get(j, "islands");
+    for (size_t i = 0; isl && i < isl->n; i++) {
+        const jv *it = isl->items[i]; const jv *ed = json_get(it, "edits");
+        printf("  %.0f. lines %.0f-%.0f  [%s]", json_getnum(it, "n", 0), json_getnum(it, "r1", 0), json_getnum(it, "r2", 0), json_gets(it, "decision", NULL));
+        for (size_t k = 0; ed && k < ed->n; k++) { const char *why = json_gets(ed->items[k], "why", NULL); printf("  #%.0f%s%s%s", json_getnum(ed->items[k], "annotation", 0), json_getbool(ed->items[k], "also", 0) ? " (also)" : "", why && *why ? ": " : "", why ? why : ""); }
+        printf("\n    - %.100s\n    + %.100s\n", json_gets(it, "old", NULL), json_gets(it, "new", NULL));
+    }
+    const jv *pr = json_get(j, "problems");
+    for (size_t i = 0; pr && i < pr->n; i++) printf("  could not apply #%.0f: %s  \"%.60s\"\n", json_getnum(pr->items[i], "annotation", 0), json_gets(pr->items[i], "problem", NULL), json_gets(pr->items[i], "find", NULL));
+}
+static jv *review_call(int port, const char *action, long n, const char *text) {
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"review\""); jopt(&b, "action", action);
+    if (n > 0) { jkey(&b, "n"); json_put_number(&b, (double)n); }
+    if (text) jopt(&b, "text", text);
+    sb_putc(&b, '}');
+    return ask(port, &b, "review");
+}
+/* revise [--backend claude|api] [--id N | --range R1 C1 R2 C2] [--wait]: ask a model to address the open notes (all of them, one, or those inside a range) */
+static int cmd_revise(int port, int argc, char **argv) {
+    int wait = 0; const char *backend = NULL; sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"revise\"");
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--wait")) wait = 1;
+        else if (!strcmp(argv[i], "--backend") && i + 1 < argc) backend = argv[++i];
+        else if (!strcmp(argv[i], "--id") && i + 1 < argc) { jkey(&b, "id"); json_put_number(&b, atof(argv[++i])); }
+        else if (!strcmp(argv[i], "--range") && i + 4 < argc) { const char *nm[4] = { "r1", "c1", "r2", "c2" }; for (int k = 0; k < 4; k++) { jkey(&b, nm[k]); json_put_number(&b, atof(argv[++i])); } }
+        else { sb_free(&b); fprintf(stderr, "usage: winless revise [--backend claude|api] [--id N | --range R1 C1 R2 C2] [--wait]\n"); return 2; }
+    }
+    if (backend) jopt(&b, "backend", backend);
+    sb_putc(&b, '}');
+    jv *j = ask(port, &b, "revise"); if (!j) return 1;
+    printf("revising with %.0f note(s) (%s)\n", json_getnum(j, "notes", 0), json_gets(j, "backend", NULL)); json_free(j);
+    if (!wait) return 0;
+    for (;;) {
+        msleep(200);
+        jv *s = review_call(port, "status", 0, NULL); if (!s) return 1;
+        const char *state = json_gets(s, "state", NULL);
+        if (state && strcmp(state, "running")) { print_review(s); int ok = !strcmp(state, "ready"); json_free(s); return ok ? 0 : 1; }
+        json_free(s);
+    }
+}
+/* review status | accept N | reject N | accept-all | reject-all | edit N TEXT | finish | cancel */
+static int cmd_review(int port, int argc, char **argv) {
+    const char *act = argc > 0 ? argv[0] : "status"; long n = 0; const char *text = NULL;
+    if (!strcmp(act, "accept") || !strcmp(act, "reject") || !strcmp(act, "edit")) {
+        if (argc < 2 || !is_num(argv[1]) || (!strcmp(act, "edit") && argc < 3)) { fprintf(stderr, "usage: winless review accept N | reject N | edit N TEXT\n"); return 2; }
+        n = atol(argv[1]); if (argc > 2) text = argv[2];
+    } else if (strcmp(act, "status") && strcmp(act, "accept-all") && strcmp(act, "reject-all") && strcmp(act, "finish") && strcmp(act, "cancel")) {
+        fprintf(stderr, "usage: winless review status | accept N | reject N | accept-all | reject-all | edit N TEXT | finish | cancel\n"); return 2;
+    }
+    jv *j = review_call(port, act, n, text); if (!j) return 1;
+    if (!strcmp(act, "status")) print_review(j);
+    else if (!strcmp(act, "finish")) {
+        printf("accepted %.0f, rejected %.0f, pending %.0f; %s%s\n", json_getnum(j, "accepted", 0), json_getnum(j, "rejected", 0), json_getnum(j, "pending", 0),
+               json_gets(j, "note", NULL), json_gets(j, "commit", NULL) ? " " : "");
+        if (json_gets(j, "commit", NULL)) printf("commit %s\n", json_gets(j, "commit", NULL));
+    }
+    json_free(j);
+    return 0;
+}
+static int cmd_backend(int port, int argc, char **argv) {
+    if (argc != 1 || (strcmp(argv[0], "claude") && strcmp(argv[0], "api"))) { fprintf(stderr, "usage: winless backend claude|api\n"); return 2; }
+    sb_t b; sb_init(&b); sb_puts(&b, "{\"cmd\":\"backend\""); jopt(&b, "value", argv[0]); sb_putc(&b, '}');
+    jv *j = ask(port, &b, "backend"); if (!j) return 1; json_free(j);
     return 0;
 }
 
@@ -631,6 +708,9 @@ int client_main(int port, int explicit_port, int argc, char **argv) {
     if (!strcmp(cmd, "open")) return cmd_open(port, explicit_port, ac, av);
     if (!strcmp(cmd, "status")) return cmd_status(port, ac, av);
     if (!strcmp(cmd, "history")) return cmd_history(port);
+    if (!strcmp(cmd, "revise")) return cmd_revise(port, ac, av);
+    if (!strcmp(cmd, "review")) return cmd_review(port, ac, av);
+    if (!strcmp(cmd, "backend")) return cmd_backend(port, ac, av);
     if (!strcmp(cmd, "annotate")) return cmd_annotate(port, ac, av);
     if (!strcmp(cmd, "annotations")) return cmd_annotations(port, ac, av);
     if (!strcmp(cmd, "unannotate")) return cmd_unannotate(port, ac, av);
