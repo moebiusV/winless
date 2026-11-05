@@ -126,11 +126,11 @@ static void t_a_remote_open_rings_the_bell_and_the_desktop_opens_the_window(void
 static void t_ssh_options_pass_to_the_connection_and_the_command_runs_there(void) {
     setup_fakes();
     char *out = make_script("echo-bell.sh", "#!/bin/sh\necho \"bell=$WINLESS_BELL\" > \"$FAKE_LOG.env\"\n");
-    pid_t pid = spawn_ssh((char *const[]){ "-p", "2222", "-o", "Compression=no", "-v", "me@fakehost", out, NULL });
+    pid_t pid = spawn_ssh((char *const[]){ "-p", "2222", "-o", "Compression=no", "-vAt", "-e", "~", "me@fakehost", out, NULL });
     CHECK_INT(wait_exit(pid, 30), 0);
     char *log = slurp(g_log);
-    CHECK_CONTAINS(log, "-p 2222 -o Compression=no -v -M ");   /* the user's options go to the connection ... */
-    CHECK_CONTAINS(log, "me@fakehost");
+    CHECK_CONTAINS(log, "-p 2222 -o Compression=no -v -e ~ -M ");   /* the user's options go to the connection ... */
+    CHECK_CONTAINS(log, " -A -e ~ -t me@fakehost export ");         /* ... except those about the shell session itself, which go to the session */
     char p[760]; snprintf(p, sizeof p, "%s.env", g_log);
     char *env = slurp(p);
     CHECK_CONTAINS(env, "bell=/tmp/winless-");                 /* ... and the command sees the bell's address */
@@ -231,6 +231,33 @@ static void t_a_host_without_winless_gets_ours_uploaded_once(void) {
     unsetenv("WINLESS_REMOTE_DIR");
 }
 
+/* No binary for the host's platform but the host has a compiler: winless is built there from our sources, copied back into the archive, and
+ * used; the next session needs no build.  (Skipped where `make` itself could not make a static build, since then neither can the host.) */
+static void t_a_host_with_a_compiler_builds_one_and_the_archive_keeps_it(void) {
+    struct utsname u; if (uname(&u)) FAIL("uname failed");
+    char built[600]; snprintf(built, sizeof built, "remote/%s-%s/winless", u.sysname, u.machine);
+    if (access(built, X_OK) != 0 || access("winless-src.tar.gz", R_OK) != 0) { printf("     (skipped: no static build or source tarball here)\n"); return; }
+    setup_fakes();
+    setenv("FAKE_REMOTE_PATH", "/usr/bin:/bin", 1);
+    char arch[400]; snprintf(arch, sizeof arch, "%s/archive", tmp_dir());
+    setenv("WINLESS_REMOTE_DIR", arch, 1);                     /* an empty archive: nothing for this platform yet */
+    char *probe = make_script("which3.sh", "#!/bin/sh\ncommand -v winless > \"$FAKE_LOG.which\"\nwinless --features > \"$FAKE_LOG.feat\"\n");
+    for (int round = 0; round < 2; round++) {
+        pid_t pid = spawn_ssh((char *const[]){ "fakehost", probe, NULL });
+        CHECK_INT(wait_exit(pid, 240), 0);
+        char p[760]; snprintf(p, sizeof p, "%s.feat", g_log);
+        char *feat = slurp(p);
+        CHECK_CONTAINS(feat, "bell");                          /* the host's shell has a working winless */
+        free(feat);
+    }
+    char kept[700]; snprintf(kept, sizeof kept, "%s/%s-%s/winless", arch, u.sysname, u.machine);
+    CHECK_INT(access(kept, X_OK), 0);                          /* and the archive has the build now */
+    char *log = slurp(g_log);
+    CHECK_INT(lines_with(log, "src.tar.gz"), 2);               /* built once (the sources sent, then unpacked), over two sessions */
+    free(log);
+    unsetenv("WINLESS_REMOTE_DIR");
+}
+
 /* Outside a session (or with a bell nobody answers) `open` behaves as it always did: it launches the browser itself -- now on a URL carrying the secret. */
 static void t_a_dead_bell_means_a_local_window_with_the_secret(void) {
     setup_fakes();
@@ -271,6 +298,7 @@ int main(void) {
         { "a_forward_that_ssh_refuses_is_reported", t_a_forward_that_ssh_refuses_is_reported, 0 },
         { "a_host_with_its_own_winless_is_left_alone", t_a_host_with_its_own_winless_is_left_alone, 0 },
         { "a_host_without_winless_gets_ours_uploaded_once", t_a_host_without_winless_gets_ours_uploaded_once, 0 },
+        { "a_host_with_a_compiler_builds_one_and_the_archive_keeps_it", t_a_host_with_a_compiler_builds_one_and_the_archive_keeps_it, 0 },
         { "a_dead_bell_means_a_local_window_with_the_secret", t_a_dead_bell_means_a_local_window_with_the_secret, 0 },
     };
     return run_tests(tests, sizeof tests / sizeof *tests) ? 1 : 0;

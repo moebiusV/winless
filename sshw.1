@@ -21,6 +21,41 @@ on the host, next to the file. Nothing needs setting up by hand: the tunnels, th
 Every option and argument is passed to ssh as you typed it (\-p, \-i, \-J, \-o, user@host, a command ...), so
 .B alias ssh=sshw
 works for interactive use.
+.SH EXAMPLES
+.nf
+sshw myserver
+.fi
+.RS
+A login shell on myserver. Inside it,
+.B winless open notes.txt
+shows notes.txt in a window on your desktop, and
+.BR "winless goto 120" ,
+.B winless search ...
+and the other commands drive that window from the host's shell. Leaving the shell closes the connection.
+.RE
+.PP
+.nf
+sshw \-p 2222 \-i ~/.ssh/work \-J bastion alice@build01
+sshw \-A myserver
+.fi
+.RS
+Ordinary ssh options (\-A, \-X, \-Y, \-a, \-x, \-t, \-T and \-e apply to the shell; the rest to the connection).
+.RE
+.PP
+.nf
+sshw myserver 'winless open \-\-wait \-N /var/log/syslog'
+.fi
+.RS
+Run one command. \fB\-\-wait\fR keeps the session open until the window is quit; without it the command returns as soon as the window
+is up, which ends the session, and the window then has nothing behind it.
+.RE
+.PP
+.nf
+alias ssh=sshw
+.fi
+.RS
+For people who never want to think about it.
+.RE
 .SH HOW IT WORKS
 .B sshw
 opens one ssh connection that stays up for the session (ssh's ControlMaster; you authenticate once, as usual, and your ~/.ssh/config
@@ -44,21 +79,53 @@ prints "bell"). If not, it uploads its own: a static binary built for that platf
 shell it starts. The bytes travel through an ssh exec channel without a terminal, which is 8-bit clean, and the uploaded program is run
 once on the host to prove it works there.
 .PP
-.B make
-builds the static binary for the machine it runs on (it needs libc.a and libsqlite3.a) as remote/OS\-MACHINE/winless, and
+The binaries live in an archive with one entry per platform, named as uname \-sm prints it with the space made a hyphen
+(Linux\-x86_64, Linux\-aarch64, Darwin\-arm64):
+~/.local/share/winless/remote/OS\-MACHINE/winless, and the copy that
 .B make install
-puts it under the data directory. For other platforms, build winless there (or cross-build it) and place it at
-~/.local/share/winless/remote/OS\-MACHINE/winless, e.g. Linux\-aarch64. If there is none, the shell still starts; only winless is
-missing on the host.
+puts under the data directory.
+.B make
+builds the static binary for the machine it runs on (it needs libc.a and libsqlite3.a) as remote/OS\-MACHINE/winless.
+.PP
+For any other platform the archive fills itself. If the host has no binary in the archive but does have a C compiler (cc, gcc or clang) with
+the sqlite3 headers and the static libc and sqlite libraries, sshw sends it the sources (winless\-src.tar.gz, made by make and installed beside
+viewer.html), builds a static winless there, copies the result back into the archive, and uses it. The next host of that kind is just an upload.
+A binary can also be placed in the archive by hand (built on such a machine, or cross-built). If there is none and none can be built, the
+shell still starts; only winless is missing on the host, and sshw says so.
 .SH OPTIONS
+All of ssh's options are accepted. Those that describe the shell session itself (\-A \-a \-X \-x \-Y \-T \-t \-e) are given to the session; all
+others (\-p \-i \-J \-o \-L ...) to the connection that sshw keeps up. As with ssh, a login shell gets a terminal and a command does not,
+unless \-t is given (\-T never).
+.PP
 Options that would interfere with the connection that sshw manages (\-M \-S \-N \-f \-O \-W) are refused.
+.SH REQUIREMENTS
+On the desktop: OpenSSH 6.7 or later (for forwarding a unix socket), and the browser winless uses. On the host: sshd allowing forwarding
+(AllowTcpForwarding and AllowStreamLocalForwarding, both on by default), and a POSIX-like login shell (bash, zsh, sh; not fish or csh).
+.SH EXIT STATUS
+That of the remote shell or command, as with ssh. 1 if the connection or the setup failed, 2 if sshw was invoked incorrectly.
+.SH DIAGNOSTICS
+.TP
+.B winless: no window can be opened from this ssh session; reconnect with `winless ssh HOST'
+winless was run in a plain ssh session, not one started by sshw.
+.TP
+.B winless: the ssh session's window helper did not answer
+The sshw that started the shell has ended (or its relay stopped); see relay.log in the session directory.
+.TP
+.B the desktop could not open the window: ssh could not forward the port
+sshd on the host refuses forwarding (see REQUIREMENTS).
+.TP
+.B the desktop could not open the window: no browser found on the desktop
+Set WINLESS_BROWSER on the desktop.
+.TP
+.B winless ssh: HOST has no winless and I have none built for OS MACHINE
+See HOSTS WITHOUT WINLESS: place a static build under ~/.local/share/winless/remote/. The shell still starts, without winless.
 .SH ENVIRONMENT
 .TP
 .B WINLESS_SSH
 The ssh program to run (default: ssh).
 .TP
 .B WINLESS_REMOTE_DIR
-An extra directory searched for the binaries to upload: DIR/OS\-MACHINE/winless.
+Use this directory as the archive of binaries (DIR/OS\-MACHINE/winless) instead of the default places; new builds are kept there too.
 .TP
 .B WINLESS_BELL
 Set by sshw in the host's shell: the socket the host's winless rings to ask your desktop for a window.

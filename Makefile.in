@@ -27,7 +27,7 @@ DIST_FILES = main.c client.c server.c remote.c json.c util.c edit.c edits.c llm.
              install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL tests/testlib.h tests/testlib.c tests/test_unit.c \
              tests/test_server.c tests/test_cli.c tests/test_revise.c tests/test_remote.c
 
-all: winless remote-stamp
+all: winless remote-stamp winless-src.tar.gz
 
 winless: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
@@ -40,6 +40,10 @@ remote-stamp: $(SRCS) winless.h
 	  echo "built remote/$$key/winless (what sshw uploads to hosts without winless)"; \
 	else rm -rf remote; echo "note: no static build here (needs libc.a and libsqlite3.a); sshw will work only on hosts that already have winless"; fi; \
 	touch remote-stamp
+
+# The sources, for `sshw` to build winless on a host that has a C compiler but no binary from us (it then keeps the result in its archive).
+winless-src.tar.gz: $(SRCS) winless.h viewer.html
+	tar czf $@ -C $(srcdir) $(SRCS) winless.h viewer.html
 
 %.o: %.c winless.h Makefile
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -72,7 +76,7 @@ check-viewer:
 	  awk '/<script>/{f=1;next} /<\/script>/{f=0} f' $(srcdir)/viewer.html > viewer.check.js && node --check viewer.check.js && echo "ok   viewer script syntax"; rc=$$?; rm -f viewer.check.js; exit $$rc; \
 	else echo "skip viewer script syntax (no node)"; fi
 
-check: winless check-viewer $(TEST_PROGS)
+check: winless winless-src.tar.gz check-viewer $(TEST_PROGS)
 	@$(RUN_TESTS)
 
 # the same tests with the program and the tests built with AddressSanitizer + UBSan
@@ -88,6 +92,7 @@ install: all
 	$(INSTALL_DATA) $(srcdir)/viewer.html $(DESTDIR)$(pkgdatadir)/viewer.html
 	$(INSTALL_DATA) $(srcdir)/winless.1 $(DESTDIR)$(mandir)/man1/winless.1
 	$(INSTALL_DATA) $(srcdir)/sshw.1 $(DESTDIR)$(mandir)/man1/sshw.1
+	$(INSTALL_DATA) winless-src.tar.gz $(DESTDIR)$(pkgdatadir)/winless-src.tar.gz
 	ln -sf winless $(DESTDIR)$(bindir)/sshw
 	for d in remote/*/; do [ -f "$${d}winless" ] || continue; \
 	  $(srcdir)/install-sh -d $(DESTDIR)$(pkgdatadir)/$${d}; $(INSTALL_PROGRAM) "$${d}winless" $(DESTDIR)$(pkgdatadir)/$${d}winless; done
@@ -105,7 +110,7 @@ dist:
 	@echo "created $(PACKAGE)-$(VERSION).tar.gz"
 
 clean:
-	rm -f winless $(OBJS) $(TEST_PROGS) tests/*.o remote-stamp
+	rm -f winless $(OBJS) $(TEST_PROGS) tests/*.o remote-stamp winless-src.tar.gz
 	rm -rf remote
 
 distclean: clean

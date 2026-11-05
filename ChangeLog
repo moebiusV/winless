@@ -4,7 +4,9 @@
 	desktop (the bell), port forwards added with ssh -O forward when a host's server needs a window, a static winless uploaded to hosts without one.
 	* server.c, client.c, util.c: per-server secret (registry file mode 0600; header, cookie or /?t=); forwarded ports accepted only with it.
 	* main.c: installed as sshw too; --features.  Makefile.in: remote-stamp builds the static binary; install links sshw.
-	* tests/test_remote.c: fake ssh and browser; bell, options, upload-once, cleanup.  tests/test_server.c: the secret.
+	* remote.c, Makefile.in: a host without a binary in the archive but with a C compiler builds winless there (sources: winless-src.tar.gz) and the
+	result is copied back into the archive (~/.local/share/winless/remote/OS-MACHINE/).  Session options (-A -X -t ...) go to the shell, the rest to the connection.
+	* tests/test_remote.c: fake ssh and browser; bell, options, upload-once, build-and-archive, cleanup.  tests/test_server.c: the secret.
 
 2026-11-03  David Walther
 

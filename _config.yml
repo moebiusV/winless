@@ -1,0 +1,17 @@
+# GitHub Pages (https://moebiusv.github.io/winless/): the front page is the README itself, pulled in by index.md.
+title: winless
+description: A "less" in its own window, drivable from the shell, and usable over ssh
+theme: jekyll-theme-minimal
+exclude:
+  - tests
+  - autom4te.cache
+  - remote
+  - "*.c"
+  - "*.h"
+  - "*.o"
+  - "*.in"
+  - configure
+  - configure.ac
+  - install-sh
+  - config.log
+  - config.status

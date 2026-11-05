@@ -18,3 +18,11 @@ Run it in place without installing:  ./winless open FILE   (it finds viewer.html
 Building from a git checkout needs autoconf 2.69 or later to regenerate ./configure from configure.ac (`autoconf`);
 release tarballs ship a generated configure.  Options for configure are the usual ones (--prefix, --bindir, --datadir,
 --mandir, CC=, CFLAGS=).
+
+Using winless on remote hosts (sshw)
+------------------------------------
+
+`make install` also installs `sshw` (a link to winless), its manual page, and the sources as winless-src.tar.gz beside viewer.html.  If libc.a and
+libsqlite3.a are installed (libc6-dev, libsqlite3-dev), `make` also builds a static winless for this platform into remote/OS-MACHINE/winless, which `sshw`
+uploads to hosts that have none.  Without them everything else works; sshw then needs winless installed on the hosts, or a compiler there to build it.
+Requires OpenSSH 6.7 or later on this machine.  See sshw(1).

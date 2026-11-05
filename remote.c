@@ -234,18 +234,81 @@ static int session_base(char *buf, size_t n) {
  * run once on the host to prove it arrived and works there. */
 static unsigned long long fnv64(unsigned long long h, const char *p, size_t n) { for (size_t i = 0; i < n; i++) { h ^= (unsigned char)p[i]; h *= 1099511628211ULL; } return h; }
 
+/* The archive of binaries for other platforms: $WINLESS_REMOTE_DIR if set (then it is the only place), else ~/.local/share/winless/remote (new
+ * builds are kept here) and then the installed copy ($pkgdatadir/remote, where make install puts the build for the machine it was built on). */
+static void archive_dir(char *buf, size_t n) {
+    const char *e = getenv("WINLESS_REMOTE_DIR");
+    if (e && *e) { snprintf(buf, n, "%s", e); return; }
+    char data[1024]; winless_data_dir(data, sizeof data); snprintf(buf, n, "%s/remote", data);
+}
+
 static int find_platform_binary(const char *key, char *out, size_t n) {
-    char dirs[3][1100]; int nd = 0;
-    const char *e = getenv("WINLESS_REMOTE_DIR"); if (e && *e) snprintf(dirs[nd++], sizeof dirs[0], "%s", e);
-    char data[1024]; winless_data_dir(data, sizeof data); snprintf(dirs[nd++], sizeof dirs[0], "%s/remote", data);
+    char dirs[2][1100]; int nd = 0;
+    archive_dir(dirs[nd++], sizeof dirs[0]);
 #ifdef PKGDATADIR
-    snprintf(dirs[nd++], sizeof dirs[0], "%s/remote", PKGDATADIR);
+    const char *only = getenv("WINLESS_REMOTE_DIR");
+    if (!only || !*only) snprintf(dirs[nd++], sizeof dirs[0], "%s/remote", PKGDATADIR);
 #endif
     for (int i = 0; i < nd; i++) {
         int w = snprintf(out, n, "%s/%s/winless", dirs[i], key);
         if (w > 0 && (size_t)w < n && access(out, R_OK) == 0) return 1;          /* (a path that does not fit is not one we have) */
     }
     return 0;
+}
+
+/* The sources, as a tarball made by `make` (winless-src.tar.gz, beside viewer.html), for building winless on a host that we have no binary for. */
+static char *read_source_ball(size_t *len) {
+    char path[4300]; snprintf(path, sizeof path, "%s", viewer_html_path());
+    char *sl = strrchr(path, '/'); if (!sl) return NULL;
+    snprintf(sl + 1, sizeof path - (size_t)(sl + 1 - path), "winless-src.tar.gz");
+    return read_file(path, len);
+}
+
+/* No binary for this platform: if the host has a C compiler, build one there from our sources, copy it back, and keep it in the archive (so the
+ * next host of this kind is just an upload).  Needs libsqlite3's headers and libc.a / libsqlite3.a on the host for a static program, which is what
+ * can be uploaded to other hosts.  Returns 1 if the archive now has the binary. */
+static int build_on_remote(const char *ctl, const char *dest, const char *uname, const char *key) {
+    size_t tl; char *tar = read_source_ball(&tl);
+    if (!tar) return 0;                                                       /* no sources to build from (run `make`, or install) */
+    char cmd[2400], bdir[120];
+    snprintf(bdir, sizeof bdir, "$HOME/.cache/winless/build-%016llx", fnv64(1469598103934665603ULL, tar, tl));
+    snprintf(cmd, sizeof cmd, "command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1");
+    { char *av[] = { (char *)ssh_bin(), "-S", (char *)ctl, (char *)dest, cmd, NULL }; if (run_capture(av, NULL, 0, NULL, 1) != 0) { free(tar); return 0; } }
+    fprintf(stderr, "winless ssh: %s has a C compiler; building winless there for %s (a minute, once)...\n", dest, uname);
+    snprintf(cmd, sizeof cmd, "B=\"%s\"; rm -rf \"$B\" && mkdir -p \"$B\" && cat > \"$B/src.tar.gz\"", bdir);
+    { char *av[] = { (char *)ssh_bin(), "-S", (char *)ctl, (char *)dest, cmd, NULL }; if (run_capture(av, tar, tl, NULL, 0) != 0) { free(tar); return 0; } }
+    free(tar);
+    snprintf(cmd, sizeof cmd,
+        "B=\"%s\"; cd \"$B\" && tar xzf src.tar.gz && CC=$(command -v cc || command -v gcc || command -v clang) && "
+        "\"$CC\" -std=c11 -O2 -static -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION='\"%s\"' -o winless *.c -lsqlite3 -lm -lpthread -ldl >build.log 2>&1 "
+        "|| { tail -n 6 build.log >&2; exit 1; }", bdir, PACKAGE_VERSION);
+    int built;
+    { char *av[] = { (char *)ssh_bin(), "-S", (char *)ctl, (char *)dest, cmd, NULL }; built = run_capture(av, NULL, 0, NULL, 0) == 0; }
+    int saved = 0;
+    if (built) {                                                              /* fetch it (8-bit clean: no terminal), check it, keep it */
+        sb_t bin; sb_init(&bin);
+        snprintf(cmd, sizeof cmd, "cat \"%s/winless\"", bdir);
+        char *av[] = { (char *)ssh_bin(), "-S", (char *)ctl, (char *)dest, cmd, NULL };
+        if (run_capture(av, NULL, 0, &bin, 1) == 0 && bin.len > 100000 && !memcmp(bin.s, "\177ELF", 4)) {
+            char adir[1100], pdir[1300], tmp[1500], fin[1500];
+            archive_dir(adir, sizeof adir);
+            snprintf(pdir, sizeof pdir, "%s/%s", adir, key);
+            for (char *p = adir + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(adir, 0755); *p = '/'; }
+            mkdir(adir, 0755); mkdir(pdir, 0755);
+            snprintf(tmp, sizeof tmp, "%s/winless.new.%ld", pdir, (long)getpid()); snprintf(fin, sizeof fin, "%s/winless", pdir);
+            FILE *f = fopen(tmp, "wb");
+            if (f) {
+                int ok = fwrite(bin.s, 1, bin.len, f) == bin.len; ok = fclose(f) == 0 && ok;
+                if (ok && chmod(tmp, 0755) == 0 && rename(tmp, fin) == 0) saved = 1; else unlink(tmp);
+            }
+        }
+        sb_free(&bin);
+    }
+    snprintf(cmd, sizeof cmd, "rm -rf \"%s\"", bdir);
+    { char *av[] = { (char *)ssh_bin(), "-S", (char *)ctl, (char *)dest, cmd, NULL }; run_capture(av, NULL, 0, NULL, 1); }
+    if (saved) fprintf(stderr, "winless ssh: kept the build for %s in the archive\n", uname);
+    else fprintf(stderr, "winless ssh: could not build a static winless on %s (it needs libsqlite3's headers and the static libc and sqlite libraries)\n", dest);
+    return saved;
 }
 
 /* On success sets *pathdir to the directory (as the host's shell will expand it) to put first on PATH, or "" if the host's own winless is used. */
@@ -270,9 +333,9 @@ static int prepare_remote(const char *ctl, const char *dest, char *pathdir, size
     char key[128]; snprintf(key, sizeof key, "%s", uname);
     for (char *p = key; *p; p++) if (*p == ' ' || *p == '/') *p = '-';
     char bin[3300];
-    if (!find_platform_binary(key, bin, sizeof bin)) {
-        fprintf(stderr, "winless ssh: %s has no winless and I have none built for %s.\n"
-                        "  Put a static build at ~/.local/share/winless/remote/%s/winless (or build it there: ./configure && make install).\n", dest, uname, key);
+    if (!find_platform_binary(key, bin, sizeof bin) && !(build_on_remote(ctl, dest, uname, key) && find_platform_binary(key, bin, sizeof bin))) {
+        fprintf(stderr, "winless ssh: %s has no winless and I have none for %s.\n"
+                        "  Put a static build at ~/.local/share/winless/remote/%s/winless, or install winless there (./configure && make install).\n", dest, uname, key);
         return -1;
     }
     size_t bl, hl; char *bdata = read_file(bin, &bl), *hdata = read_file(viewer_html_path(), &hl);
@@ -318,19 +381,37 @@ static void remove_session(const char *dir) {
 
 int remote_ssh_main(int argc, char **argv) {
     const char *dest = NULL; int ai = 0;
+    /* The options you type go to the connection (uopts) -- except those that are about the shell session itself (-A -a -X -x -Y -T -t -e), which
+     * must go to the session's ssh instead (sopts, tty_opts): a muxed session ignores most connection options, and the connection ignores these. */
     char *uopts[64]; int nuopts = 0;
+    char *sopts[32]; int nsopts = 0, ttys = 0, notty = 0;
     for (; ai < argc; ai++) {
         const char *a = argv[ai];
         if (a[0] != '-' || !a[1]) { dest = a; ai++; break; }
-        if (nuopts + 2 >= 64) { fprintf(stderr, "winless ssh: too many options\n"); return 2; }
-        uopts[nuopts++] = argv[ai];
+        if (nuopts + 2 >= 64 || nsopts + 2 >= 32) { fprintf(stderr, "winless ssh: too many options\n"); return 2; }
+        char *kept = xstrdup(a); size_t k = 1;
         for (const char *p = a + 1; *p; p++) {
             if (strchr("MSNfOW", *p)) { fprintf(stderr, "winless ssh: -%c would interfere with the connection winless manages\n", *p); return 2; }
-            if (opt_takes_arg(*p)) { if (!p[1]) { if (ai + 1 >= argc) { fprintf(stderr, "winless ssh: -%c needs an argument\n", *p); return 2; } uopts[nuopts++] = argv[++ai]; } break; }
+            if (opt_takes_arg(*p)) {
+                const char *arg = p[1] ? p + 1 : NULL;
+                if (!arg && ai + 1 >= argc) { fprintf(stderr, "winless ssh: -%c needs an argument\n", *p); return 2; }
+                if (*p == 'e') { sopts[nsopts++] = "-e"; sopts[nsopts++] = (char *)(arg ? arg : argv[ai + 1]); }
+                size_t rest = strlen(p); memcpy(kept + k, p, rest); k += rest;
+                kept[k] = 0;
+                uopts[nuopts++] = kept; kept = NULL;
+                if (!arg) uopts[nuopts++] = argv[++ai];
+                break;
+            }
+            if (*p == 't') ttys++;
+            else if (*p == 'T') notty = 1;
+            else if (strchr("AaXxY", *p)) { char *f = xmalloc(3); f[0] = '-'; f[1] = *p; f[2] = 0; sopts[nsopts++] = f; }
+            else kept[k++] = *p;
         }
+        if (kept) { kept[k] = 0; if (k > 1) uopts[nuopts++] = kept; }
     }
     if (!dest) { fprintf(stderr, "usage: winless ssh [ssh-options] HOST [COMMAND]\n"); return 2; }
     char **cmd = argv + ai; int ncmd = argc - ai;
+    const char *tty_opt = notty ? NULL : ttys > 1 ? "-tt" : (ttys || !ncmd) ? "-t" : NULL;      /* ssh's own rule: a terminal for a login shell, none for a command unless asked */
 
     signal(SIGPIPE, SIG_IGN);
     char base[512];
@@ -382,7 +463,8 @@ int remote_ssh_main(int argc, char **argv) {
         else sb_puts(&rc_cmd, "exec \"${SHELL:-/bin/sh}\" -l");
         char *av[96]; int n = 0;
         av[n++] = (char *)ssh_bin(); av[n++] = "-S"; av[n++] = ctl;
-        if (!ncmd) av[n++] = "-t";
+        for (int i = 0; i < nsopts; i++) av[n++] = sopts[i];
+        if (tty_opt) av[n++] = (char *)tty_opt;
         av[n++] = (char *)dest; av[n++] = rc_cmd.s; av[n] = NULL;
         rc = run_plain(av);
         sb_free(&rc_cmd);

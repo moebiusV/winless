@@ -234,8 +234,17 @@ refuses one that has unsaved edits unless \-\-force.
 .BR sshw )
 is ssh with winless working on the host: inside it,
 .B winless open FILE
-shows the window on this desktop while the server, the file, history, git and filters stay on the host. See
-.BR sshw (1).
+shows the window on this desktop while the server, the file, history, git and filters stay on the host. For example:
+.PP
+.nf
+    sshw myserver                       # a shell on myserver, as ssh gives
+    myserver$ winless open notes.txt    # the window appears on this desktop
+    myserver$ winless goto 120          # driven from the host's shell
+.fi
+.PP
+A host that has no winless gets a static build uploaded on first use. See
+.BR sshw (1)
+for the options, the requirements and what to do when something does not work.
 .SH KEYS
 j, Down, Enter, e: line down; k, Up, y: line up; Space, f, PageDown: page down; b, PageUp: page up; d, u: half page;
 g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match, wrapping around at the ends of the file (like vim's wrapscan); h, Left / l, Right: scroll sideways when long lines are chopped (w toggles), 0: back to column 0; Ctrl-d, Ctrl-u: half page; Ctrl-f, Ctrl-b: page; Ctrl-e, Ctrl-y: line; gg: top;
@@ -302,7 +311,8 @@ The ssh program used by
 (default: ssh).
 .TP
 .B WINLESS_REMOTE_DIR
-A directory of binaries to upload to hosts that have no winless: DIR/OS\-MACHINE/winless.
+The archive of binaries that sshw uploads to hosts that have no winless (DIR/OS\-MACHINE/winless), used instead of
+~/.local/share/winless/remote; builds made on a host are kept there.
 .SH FILES
 .TP
 .I ~/.cache/winless/server.log
