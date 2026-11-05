@@ -885,7 +885,7 @@ function rvRangesFor(i) {            // the changed words on review line i, in U
 function rvDetail() {                // the right side of the bar while reviewing: which notes caused this change, and the tally
   const rv = S.rv; if (!rv || rv.state !== "ready" || !rv.islands.length) return "";
   const is = rv.islands[S.rvCur]; if (!is) return "";
-  const why = is.edits.map(e => "#" + e.annotation + (e.also ? " also" : "") + (e.why ? ": " + e.why : "")).join("; ");
+  const why = is.edits.map(e => (e.annotations || [e.annotation]).map(a => "#" + a).join(" ") + (e.also ? " also" : "") + (e.why ? ": " + e.why : "")).join("; ");
   return why + "   [" + rv.accepted + " accepted, " + rv.rejected + " rejected, " + rv.pending + " pending" + (rv.problems.length ? ", " + rv.problems.length + " could not be applied (P)" : "") + "]";
 }
 

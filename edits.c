@@ -40,6 +40,14 @@ const char *edits_parse(const char *reply, size_t len, edit_item **out, size_t *
         if (!find || !rep) { snprintf(g_perr, sizeof g_perr, "edit %zu lacks find or replace", i + 1); edits_free(e, k); json_free(root); return g_perr; }
         memset(&e[k], 0, sizeof e[k]);
         e[k].annotation = (long)json_getnum(it, "annotation", 0);
+        const jv *ids = json_get(it, "annotations");                    /* an edit may answer several notes: the first is the main one */
+        if (ids && ids->t == J_ARR)
+            for (size_t q = 0; q < ids->n; q++) {
+                if (ids->items[q]->t != J_NUM) continue;
+                long id = (long)ids->items[q]->num;
+                if (!e[k].annotation) e[k].annotation = id;
+                else if (id != e[k].annotation && e[k].nextra < 8) e[k].extra[e[k].nextra++] = id;
+            }
         e[k].also = json_getbool(it, "also", 0);
         e[k].find = xstrndup(find, fl); e[k].replace = xstrndup(rep, rl); e[k].why = xstrdup(why ? why : "");
         k++;

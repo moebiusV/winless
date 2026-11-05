@@ -217,6 +217,9 @@ static void t_edits_parse(void) {
     e = parse_ok("Here are the edits:\n```json\n{\"edits\": [{\"annotation\": 1, \"find\": \"x\", \"replace\": \"y\"}]}\n```\nDone.", &n);   /* prose and a fence around it */
     CHECK_INT(n, 1); CHECK_STR(e[0].find, "x"); edits_free(e, n);
     e = parse_ok("[{\"find\":\"x\",\"replace\":\"y\"}]", &n); CHECK_INT(n, 1); edits_free(e, n);                              /* a bare list is fine too */
+    e = parse_ok("{\"edits\":[{\"annotations\":[4,7,9],\"find\":\"x\",\"replace\":\"y\"},{\"annotations\":[5],\"find\":\"a\",\"replace\":\"b\"}]}", &n);
+    CHECK_INT(n, 2); CHECK_INT(e[0].annotation, 4); CHECK_INT(e[0].nextra, 2); CHECK_INT(e[0].extra[0], 7); CHECK_INT(e[0].extra[1], 9);   /* one edit, several notes */
+    CHECK_INT(e[1].annotation, 5); CHECK_INT(e[1].nextra, 0); edits_free(e, n);
     e = parse_ok("{\"edits\":[]}", &n); CHECK_INT(n, 0); edits_free(e, n);                                                  /* nothing to change is an answer */
     e = parse_ok("{\"edits\":[{\"find\":\"caf\\u00e9\",\"replace\":\"cafe\\n\"}]}", &n);
     CHECK_STR(e[0].find, "caf\xC3\xA9"); CHECK_STR(e[0].replace, "cafe\n"); edits_free(e, n);

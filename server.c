@@ -755,6 +755,11 @@ static void rv_counts(long *a, long *rj, long *p) {
     *a = *rj = *p = 0;
     for (size_t g = 0; g < RV.nisl; g++) { if (RV.decision[g] == 1) (*a)++; else if (RV.decision[g] == 2) (*rj)++; else (*p)++; }
 }
+static int edit_answers(const edit_item *e, long id) {           /* does this edit answer note `id`? */
+    if (e->annotation == id) return 1;
+    for (int q = 0; q < e->nextra; q++) if (e->extra[q] == id) return 1;
+    return 0;
+}
 static void review_status_json(sb_t *r) {
     const char *st = RV.state == RV_RUNNING ? "running" : RV.state == RV_READY ? "ready" : RV.state == RV_ERROR ? "error" : "none";
     sb_printf(r, "{\"ok\":true,\"state\":\"%s\",\"backend\":\"%s\",\"scope\":\"%s\"", st, RV.backend, RV.scope);
@@ -773,7 +778,9 @@ static void review_status_json(sb_t *r) {
         for (size_t k = 0; k < is->nidx; k++) {
             const edit_item *e = &RV.edits[is->idx[k]];
             if (k) sb_putc(r, ',');
-            sb_printf(r, "{\"annotation\":%ld,\"also\":%s,\"why\":", e->annotation, e->also ? "true" : "false"); json_put_string(r, e->why, strlen(e->why)); sb_putc(r, '}');
+            sb_printf(r, "{\"annotation\":%ld,\"annotations\":[%ld", e->annotation, e->annotation);
+            for (int q = 0; q < e->nextra; q++) sb_printf(r, ",%ld", e->extra[q]);
+            sb_printf(r, "],\"also\":%s,\"why\":", e->also ? "true" : "false"); json_put_string(r, e->why, strlen(e->why)); sb_putc(r, '}');
         }
         sb_puts(r, "]}");
     }
@@ -831,9 +838,9 @@ static void review_finish(sb_t *r) {
     sb_t done_ids; sb_init(&done_ids);
     for (size_t a = 0; a < RV.nann; a++) {
         long id = RV.ann[a]; int total = 0, taken = 0, bad = 0, primary = 0;
-        for (size_t i = 0; i < RV.nedits; i++) if (RV.edits[i].annotation == id && !RV.edits[i].also) primary = 1;
+        for (size_t i = 0; i < RV.nedits; i++) if (edit_answers(&RV.edits[i], id) && !RV.edits[i].also) primary = 1;
         for (size_t i = 0; i < RV.nedits; i++) {
-            const edit_item *e = &RV.edits[i]; if (e->annotation != id || (primary && e->also)) continue;
+            const edit_item *e = &RV.edits[i]; if (!edit_answers(e, id) || (primary && e->also)) continue;
             total++;
             if (!e->ok) { bad = 1; continue; }
             for (size_t g = 0; g < RV.nisl; g++) for (size_t k = 0; k < RV.isl[g].nidx; k++) if (RV.isl[g].idx[k] == i) { if (RV.decision[g] == 1) taken++; else bad = 1; }

@@ -25,11 +25,14 @@ static const char SYSTEM_PROMPT[] =
     "names, citations, and markup (markdown, headings, tokens such as {{c:id00018}}) unless an annotation says otherwise. Do not add facts.\n"
     "- If an annotation needs no change, or you cannot address it without guessing, leave it out. Never invent a change to look busy.\n"
     "- Answer with JSON only, no prose and no code fence, in exactly this form:\n"
-    "  {\"edits\":[{\"annotation\":<id>,\"find\":\"<text copied exactly from the document>\",\"replace\":\"<the new text>\","
+    "  {\"edits\":[{\"annotations\":[<id>],\"find\":\"<text copied exactly from the document>\",\"replace\":\"<the new text>\","
     "\"why\":\"<a few words>\",\"also\":false}]}\n"
+    "  List in \"annotations\" every annotation the edit answers.\n"
     "- \"find\" must be copied exactly from the document (same characters, spaces, punctuation and line breaks) and must occur exactly "
     "once in the document. Use the shortest span that is unique and contains everything you change; add neighbouring words until it is unique.\n"
-    "- Edits must not overlap one another. To delete text, use an empty \"replace\".\n"
+    "- Edits must not overlap or touch one another: each \"find\" must end before the next one begins. When two annotations affect the same "
+    "or adjacent words, answer them with ONE edit that covers both, list both ids in \"annotations\", and say so in \"why\".\n"
+    "- To delete text, use an empty \"replace\".\n"
     "- If there is nothing to change, answer {\"edits\":[]}.\n";
 
 const char *llm_system_prompt(void) { return SYSTEM_PROMPT; }

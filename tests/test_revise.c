@@ -255,6 +255,22 @@ static void t_scopes_choose_the_notes_sent(void) {
     json_free(review_do("cancel", 0));
 }
 
+static void t_one_edit_can_answer_several_notes(void) {
+    start_server();
+    open_doc("rv12.txt", DOC); mark_doc();
+    long s, k, n; ids_of_marks(&s, &k, &n);
+    char buf[600];                                         /* the slop mark and the note touch adjacent words: the model answers both with one edit */
+    snprintf(buf, sizeof buf, "{\"edits\":[{\"annotations\":[%ld,%ld],\"find\":\"very good\",\"replace\":\"good\",\"why\":\"both\"}]}", s, n);
+    put_file("REPLY", buf);
+    expect_ok(CLI("revise", "--wait"));
+    jv *st = review_status(); CHECK_INT(json_get(st, "islands")->n, 1);
+    const jv *ed = json_get(json_get(st, "islands")->items[0], "edits")->items[0];
+    CHECK_INT(json_get(ed, "annotations")->n, 2); json_free(st);                                  /* the review shows both notes */
+    json_free(review_do("accept", 1)); jv *fin = review_do("finish", 0); json_free(fin);
+    jv *l = post_json("/cmd", "{\"cmd\":\"annotations\"}");
+    CHECK_STR(status_of(l, s), "done"); CHECK_STR(status_of(l, n), "done"); CHECK_STR(status_of(l, k), "open"); json_free(l);   /* accepting it finishes both */
+}
+
 static void t_no_notes_means_no_request(void) {
     start_server();
     rm_file("REQ");
@@ -354,6 +370,7 @@ int main(void) {
         { "cancel_stops_the_model", t_cancel_stops_the_model, 0 },
         { "a_slow_model_times_out", t_a_slow_model_times_out, 0 },
         { "scopes_choose_the_notes_sent", t_scopes_choose_the_notes_sent, 0 },
+        { "one_edit_can_answer_several_notes", t_one_edit_can_answer_several_notes, 0 },
         { "no_notes_means_no_request", t_no_notes_means_no_request, 0 },
         { "unsaved_edits_are_not_written", t_unsaved_edits_are_not_written, 0 },
         { "text_that_changed_while_the_model_worked", t_text_that_changed_while_the_model_worked, 0 },

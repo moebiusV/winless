@@ -65,6 +65,7 @@ const char *store_set_deleted(long id, int deleted);                            
 /* ---- edits.c ---- (the model's proposed edits: parse, verify, group into islands, apply) */
 typedef struct {
     long annotation; int also;              /* the note this answers (0: none); also: an extra spot found for a slop mark */
+    long extra[8]; int nextra;              /* more notes the same edit answers (when two notes touch the same or adjacent words) */
     char *find, *replace, *why;             /* replace the exact text `find` with `replace`, because `why` */
     int ok; size_t off, len; char *problem; /* after edits_verify: ok and the byte range found, or why it could not be applied */
 } edit_item;
