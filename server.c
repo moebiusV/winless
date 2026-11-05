@@ -63,6 +63,7 @@ static void on_term(int sig) { (void)sig; g_stop = 1; }
 static int g_listen_port;           /* for checking the Host and Origin of requests */
 static double g_idle_secs;          /* > 0 for a server made for one window: it ends with that window */
 static double g_quit_at;            /* when the window said quit (:q!, :wq, q), the time the server ends */
+static char g_token[65];            /* this server's secret: a request must carry it (header, cookie, or ?t= on the page) */
 
 /* ------------------------------------------------------------------------------------------------------- hub */
 static void hub_init(void) {
@@ -148,13 +149,14 @@ static void flush_conn(conn *c) {
     }
 }
 
-static void respond(conn *c, int code, const char *ctype, const char *body, size_t len) {
-    const char *reason = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Internal Server Error";
-    sb_printf(&c->out, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-              code, reason, ctype, len);
+static void respond_x(conn *c, int code, const char *ctype, const char *body, size_t len, const char *extra) {   /* extra: header lines ending in \r\n, or NULL */
+    const char *reason = code == 200 ? "OK" : code == 302 ? "Found" : code == 400 ? "Bad Request" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Internal Server Error";
+    sb_printf(&c->out, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n%s\r\n",
+              code, reason, ctype, len, extra ? extra : "");
     sb_put(&c->out, body, len);
     c->state = ST_CLOSING;
 }
+static void respond(conn *c, int code, const char *ctype, const char *body, size_t len) { respond_x(c, code, ctype, body, len, NULL); }
 static void respond_json(conn *c, sb_t *b) { respond(c, 200, "application/json; charset=utf-8", b->s, b->len); sb_free(b); }
 static void respond_err(conn *c, int code, const char *msg) {
     sb_t b; sb_init(&b); sb_puts(&b, "{\"error\":"); json_put_string(&b, msg, strlen(msg)); sb_putc(&b, '}');
@@ -330,7 +332,7 @@ static size_t history_list(const char *dir, char ***names) {         /* the snap
         (*names)[n++] = xstrdup(e->d_name);
     }
     closedir(d);
-    qsort(*names, n, sizeof **names, cmp_str);
+    if (n) qsort(*names, n, sizeof **names, cmp_str);                  /* (not on a NULL array: that is undefined even for zero elements) */
     return n;
 }
 static void history_free(char **names, size_t n) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); }
@@ -1050,20 +1052,46 @@ static void handle_request(conn *c, const char *method, const char *path, const 
 
 /* Only this machine's own pages may talk to the server: a web page from anywhere else (or a hostname rebound to 127.0.0.1) must not be
  * able to edit, write or run a filter.  Browsers always send Host, and Origin on cross-origin and POST requests. */
-static int local_name_ok(const char *h, int with_scheme) {
+static int local_name_ok(const char *h, int with_scheme, int strict_port) {
     if (with_scheme) { if (strncasecmp(h, "http://", 7) != 0) return 0; h += 7; }
     size_t n;
     if (*h == '[') { const char *e = strchr(h, ']'); if (!e) return 0; n = (size_t)(e - h) + 1; }
     else { const char *e = strchr(h, ':'); n = e ? (size_t)(e - h) : strlen(h); }
     int ok = (n == 9 && !strncasecmp(h, "localhost", 9)) || (n == 9 && !strncmp(h, "127.0.0.1", 9)) || (n == 5 && !strncmp(h, "[::1]", 5));
     if (!ok) return 0;
-    if (h[n] == ':') { char *end; long p = strtol(h + n + 1, &end, 10); return *end == 0 && p == g_listen_port; }
+    if (h[n] == ':') { char *end; long p = strtol(h + n + 1, &end, 10); return *end == 0 && p > 0 && (!strict_port || p == g_listen_port); }
     return h[n] == 0;
 }
-static int request_allowed(const char *host, const char *origin) {
-    if (host && !local_name_ok(host, 0)) return 0;
-    if (origin && !local_name_ok(origin, 1)) return 0;
+/* A request that carries the secret may come through a forwarded port (ssh -L), so its port need not be ours -- but an Origin must then be
+ * exactly the page's own Host.  Without the secret only /ping is answered, and only on our own port. */
+static const char *port_part(const char *h) {                       /* what follows the colon after the name ("" if none) */
+    const char *close = strchr(h, ']'), *colon = strchr(close ? close : h, ':');
+    return colon ? colon + 1 : "";
+}
+static int request_allowed(const char *host, const char *origin, int authed) {
+    if (host && !local_name_ok(host, 0, !authed)) return 0;
+    if (origin && !local_name_ok(origin, 1, !authed)) return 0;
+    if (authed && host && origin && strcmp(port_part(origin + 7), port_part(host)) != 0) return 0;     /* the page's origin is the port it was loaded from */
     return 1;
+}
+
+/* constant-time comparison of a presented secret with ours */
+static int token_matches(const char *s, size_t n) {
+    if (n != strlen(g_token)) return 0;
+    unsigned char d = 0;
+    for (size_t i = 0; i < n; i++) d |= (unsigned char)(s[i] ^ g_token[i]);
+    return d == 0;
+}
+static int cookie_has_token(const char *cookies) {                  /* any cookie whose value is the secret (the name carries the port) */
+    for (const char *p = cookies; *p;) {
+        while (*p == ' ' || *p == ';') p++;
+        const char *eq = strchr(p, '='), *semi = strchr(p, ';');
+        if (!eq) break;
+        const char *end = semi ? semi : p + strlen(p);
+        if (eq < end && token_matches(eq + 1, (size_t)(end - eq - 1))) return 1;
+        p = end;
+    }
+    return 0;
 }
 
 /* Try to parse one complete request out of c->in. */
@@ -1074,11 +1102,19 @@ static void try_request(conn *c) {
     char *line_end = strstr(c->in.s, "\r\n");
     char method[16] = "", path[2048] = "";
     if (sscanf(c->in.s, "%15s %2047s", method, path) != 2 || !line_end) { respond_err(c, 400, "bad request"); return; }
-    size_t clen = 0; char host[200] = "", origin[200] = ""; int have_host = 0, have_origin = 0;
+    size_t clen = 0; char host[200] = "", origin[200] = ""; int have_host = 0, have_origin = 0, authed = 0;
     for (char *p = line_end + 2; p < hdr_end + 2;) {
         char *e = strstr(p, "\r\n"); if (!e) break;
         if (!strncasecmp(p, "content-length:", 15)) { unsigned long long v = strtoull(p + 15, NULL, 10); if (v > MAX_BODY) { respond_err(c, 400, "body too large"); return; } clen = (size_t)v; }
-        else if (!strncasecmp(p, "host:", 5) || !strncasecmp(p, "origin:", 7)) {
+        else if (!strncasecmp(p, "x-winless-token:", 16)) {
+            const char *val = p + 16; while (val < e && *val == ' ') val++;
+            if (token_matches(val, (size_t)(e - val))) authed = 1;
+        } else if (!strncasecmp(p, "cookie:", 7)) {
+            char ck[2048]; const char *val = p + 7; while (val < e && *val == ' ') val++;
+            size_t vl = (size_t)(e - val); if (vl >= sizeof ck) vl = sizeof ck - 1;
+            memcpy(ck, val, vl); ck[vl] = 0;
+            if (cookie_has_token(ck)) authed = 1;
+        } else if (!strncasecmp(p, "host:", 5) || !strncasecmp(p, "origin:", 7)) {
             int is_host = !strncasecmp(p, "host:", 5); char *val = p + (is_host ? 5 : 7);
             while (val < e && (*val == ' ' || *val == '\t')) val++;
             size_t vl = (size_t)(e - val); char *dst = is_host ? host : origin; if (vl >= 200) vl = 199;
@@ -1086,7 +1122,17 @@ static void try_request(conn *c) {
         }
         p = e + 2;
     }
-    if (!request_allowed(have_host ? host : NULL, have_origin ? origin : NULL)) { respond_err(c, 403, "forbidden: only pages from this machine may use this server"); return; }
+    /* the window is opened on /?t=SECRET: that request trades the secret for a cookie and is sent on to / */
+    int first_visit = !strncmp(path, "/?t=", 4) && token_matches(path + 4, strcspn(path + 4, "&"));
+    int is_ping = !strcmp(path, "/ping");
+    if (!request_allowed(have_host ? host : NULL, have_origin ? origin : NULL, authed || first_visit)) { respond_err(c, 403, "forbidden: only pages from this machine may use this server"); return; }
+    if (!authed && !first_visit && !is_ping) { respond_err(c, 403, "forbidden: missing or wrong secret"); return; }
+    if (first_visit && !authed) {
+        const char *hp = have_host ? strrchr(host, ':') : NULL; int port = hp && atoi(hp + 1) > 0 ? atoi(hp + 1) : g_listen_port;
+        char hdr[200]; snprintf(hdr, sizeof hdr, "Location: /\r\nSet-Cookie: wl-%d=%s; Path=/; HttpOnly; SameSite=Strict\r\n", port, g_token);
+        respond_x(c, 302, "text/plain", "", 0, hdr);
+        return;
+    }
     if (c->in.len < head_len + clen) return;                  /* body not complete yet */
     handle_request(c, method, path, c->in.s + head_len, clen);
 }
@@ -1104,22 +1150,22 @@ static int make_listener(int port) {
 }
 
 /* Every server records its port in ~/.cache/winless/ports/PORT (its pid inside), so `winless windows` can find them all. */
-static void registry_file(int port, char *buf, size_t n) {
-    char dir[1024]; winless_cache_dir(dir, sizeof dir);
-    char pd[1100]; snprintf(pd, sizeof pd, "%s/ports", dir); mkdir(pd, 0755);
-    snprintf(buf, n, "%s/%d", pd, port);
+static void registry_file(int port, char *buf, size_t n) { winless_port_file(port, buf, n, 1); }
+static void registry_add(int port) {                              /* line 1: the pid; line 2: the secret (so the file is private to the user) */
+    char f[1300]; registry_file(port, f, sizeof f);
+    unlink(f);
+    int fd = open(f, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    FILE *fp = fd >= 0 ? fdopen(fd, "w") : NULL;
+    if (fp) { fprintf(fp, "%ld\n%s\n", (long)getpid(), g_token); fclose(fp); }
 }
-static void registry_add(int port) {
-    char f[1200]; registry_file(port, f, sizeof f);
-    FILE *fp = fopen(f, "w"); if (fp) { fprintf(fp, "%ld\n", (long)getpid()); fclose(fp); }
-}
-static void registry_remove(int port) { char f[1200]; registry_file(port, f, sizeof f); unlink(f); }
+static void registry_remove(int port) { char f[1300]; registry_file(port, f, sizeof f); unlink(f); }
 
 int server_run(int port, double idle_secs) {
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_term; sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
     hub_init();
+    if (!token_make(g_token, sizeof g_token)) { fprintf(stderr, "winless: cannot make a secret (/dev/urandom)\n"); return 1; }
     int ls = make_listener(port);
     if (ls < 0) { fprintf(stderr, "winless: cannot listen on 127.0.0.1:%d: %s\n", port, strerror(errno)); return 1; }
     printf("winless %s serving on http://127.0.0.1:%d/\n", PACKAGE_VERSION, port); fflush(stdout);

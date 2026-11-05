@@ -225,6 +225,17 @@ stops every server, and (like
 and
 .BR "open \-\-here" )
 refuses one that has unsaved edits unless \-\-force.
+.SH REMOTE HOSTS
+.B winless ssh
+.RI [ ssh-options ]
+.I host
+.RI [ command ]
+(also installed as
+.BR sshw )
+is ssh with winless working on the host: inside it,
+.B winless open FILE
+shows the window on this desktop while the server, the file, history, git and filters stay on the host. See
+.BR sshw (1).
 .SH KEYS
 j, Down, Enter, e: line down; k, Up, y: line up; Space, f, PageDown: page down; b, PageUp: page up; d, u: half page;
 g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match, wrapping around at the ends of the file (like vim's wrapscan); h, Left / l, Right: scroll sideways when long lines are chopped (w toggles), 0: back to column 0; Ctrl-d, Ctrl-u: half page; Ctrl-f, Ctrl-b: page; Ctrl-e, Ctrl-y: line; gg: top;
@@ -278,11 +289,29 @@ Alternate viewer page.
 .TP
 .B WINLESS_PROFILE
 Windows path of the browser profile directory used for the window (default: %LOCALAPPDATA%\\winless\\profile). A dedicated profile makes the browser start a separate process, which is what makes the full-screen and window-size flags take effect when Edge is already running. Set it to the empty string to use the browser's normal profile.
+.TP
+.B WINLESS_BELL
+Set inside
+.BR "winless ssh" :
+the socket to ring to have this desktop open the window. See
+.BR sshw (1).
+.TP
+.B WINLESS_SSH
+The ssh program used by
+.B winless ssh
+(default: ssh).
+.TP
+.B WINLESS_REMOTE_DIR
+A directory of binaries to upload to hosts that have no winless: DIR/OS\-MACHINE/winless.
 .SH FILES
 .TP
 .I ~/.cache/winless/server.log
 Server log.
+.TP
+.I ~/.cache/winless/ports/PORT
+A running server: its process id, and its secret (mode 0600; every request but /ping must carry it).
 .SH SEE ALSO
+.BR sshw (1),
 .BR less (1)
 .SH AUTHOR
 David Walther.

@@ -24,6 +24,7 @@ extern int g_port;                 /* the port of the current test's server */
 void testlib_init(void);           /* sets HOME to a private directory, finds the binary under test */
 void testlib_init_noserver(void);  /* the same without needing the binary (unit tests) */
 const char *tmp_dir(void);
+const char *test_token(void);      /* the current test server's secret, for raw requests */
 char *tmp_write(const char *name, const char *data, size_t len);     /* write a file in the temp dir; returns its path */
 void msleep(int ms);
 int free_port(void);

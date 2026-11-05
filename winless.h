@@ -27,6 +27,9 @@ double now_monotonic(void);
 void winless_data_dir(char *buf, size_t n);                /* ~/.local/share/winless (or $XDG_DATA_HOME/winless), created */
 void winless_cache_dir(char *buf, size_t n);               /* ~/.cache/winless (or $XDG_CACHE_HOME/winless), created */
 char *read_file(const char *path, size_t *len);            /* NULL on error */
+void winless_port_file(int port, char *buf, size_t n, int create);   /* ~/.cache/winless/ports/PORT (line 1: pid, line 2: the server's secret); create: make the 0700 directory */
+int winless_port_token(int port, char *buf, size_t n);     /* the secret of the server on PORT (read from its registry file); 0 if there is none */
+int token_make(char *buf, size_t n);                       /* a fresh random secret as 64 hex digits (n >= 65); 0 on failure */
 
 /* ---- json.c ---- */
 typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jtype;
@@ -97,5 +100,13 @@ int server_run(int port, double idle_secs);              /* serve until stopped 
 int client_main(int port, int explicit_port, int argc, char **argv);   /* the CLI commands; explicit_port: --port or $WINLESS_PORT was given */
 int server_alive(int port);
 const char *viewer_html_path(void);
+int open_url_window(const char *url, int windowed);                    /* a chromeless browser window on URL */
+int free_local_port(void);                                             /* a currently unused loopback port, or 0 */
+
+/* ---- remote.c ---- (winless over ssh: the desktop side runs `winless ssh`, which keeps a relay; the remote side rings its bell) */
+int remote_ssh_main(int argc, char **argv);            /* winless ssh [ssh-options] HOST [command] */
+int remote_relay_main(int argc, char **argv);          /* winless relay DIR CTL DEST BELL   (started by `winless ssh`, not by hand) */
+int bell_available(void);                              /* true inside `winless ssh`: $WINLESS_BELL names a socket that answers */
+int bell_call(const char *line, size_t n, char **reply);   /* send one request line to the relay; 0 on success, *reply is its answer */
 
 #endif

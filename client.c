@@ -33,8 +33,9 @@ static int http_do(int port, const char *method, const char *path, const char *b
     a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return 0; }
     sb_t req; sb_init(&req);
-    sb_printf(&req, "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
-              method, path, port, blen);
+    char tok[96] = ""; winless_port_token(port, tok, sizeof tok);        /* the server's secret, from the registry file only this user can read */
+    sb_printf(&req, "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\nX-Winless-Token: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
+              method, path, port, tok, blen);
     if (blen) sb_put(&req, body, blen);
     size_t off = 0;
     while (off < req.len) {
@@ -162,9 +163,8 @@ static char *windows_profile_dir(void) {
     return sb_detach(&b, NULL);
 }
 
-static int open_window(int port, int windowed) {
-    char url[64], app[96];
-    snprintf(url, sizeof url, "http://localhost:%d/", port);
+int open_url_window(const char *url, int windowed) {              /* a chromeless browser window on URL (also used by the ssh relay) */
+    char app[400];
     snprintf(app, sizeof app, "--app=%s", url);
     const char *b = find_browser();
     if (b) {
@@ -187,10 +187,17 @@ static int open_window(int port, int windowed) {
         free(prof); free(udd);
         return ok;
     }
-    char *ex[] = { "explorer.exe", url, NULL };
+    char *ex[] = { "explorer.exe", (char *)url, NULL };
     if (spawn_detached(ex, 1, NULL)) return 1;
-    char *xo[] = { "xdg-open", url, NULL };
+    char *xo[] = { "xdg-open", (char *)url, NULL };
     return spawn_detached(xo, 1, NULL);
+}
+
+static int open_window(int port, int windowed) {
+    char url[200], tok[96] = "";
+    winless_port_token(port, tok, sizeof tok);
+    snprintf(url, sizeof url, "http://localhost:%d/?t=%s", port, tok);      /* the first visit trades the secret for a cookie */
+    return open_url_window(url, windowed);
 }
 
 static long status_num(int port, const char *key) {          /* a top-level number from /status */
@@ -203,9 +210,31 @@ static long status_num(int port, const char *key) {          /* a top-level numb
     return v;
 }
 
+/* Inside `winless ssh`: this machine has no screen, so ask the desktop (through the ssh session's bell) to forward this server's port and open the window. */
+static int ring_bell(int port, int windowed) {
+    char tok[96] = ""; winless_port_token(port, tok, sizeof tok);
+    sb_t b; sb_init(&b); sb_printf(&b, "{\"cmd\":\"window\",\"port\":%d,\"windowed\":%s,\"token\":", port, windowed ? "true" : "false");
+    json_put_string(&b, tok, strlen(tok)); sb_puts(&b, "}\n");
+    char *rep = NULL;
+    int rc = bell_call(b.s, b.len, &rep);
+    sb_free(&b);
+    if (rc) { fprintf(stderr, "winless: the ssh session's window helper did not answer (did `winless ssh` end?)\n"); free(rep); return 0; }
+    jv *j = json_parse(rep ? rep : "", rep ? strlen(rep) : 0); free(rep);
+    int ok = j && json_getbool(j, "ok", 0);
+    if (!ok) { const char *e = j ? json_gets(j, "error", NULL) : NULL; fprintf(stderr, "winless: the desktop could not open the window: %s\n", e ? e : "no answer"); }
+    json_free(j);
+    return ok;
+}
+
 static int ensure_window(int port, int windowed) {
     if (status_num(port, "clients") > 0) return 1;
-    if (!open_window(port, windowed)) { fprintf(stderr, "winless: no Windows browser found; open http://localhost:%d/ yourself\n", port); return 0; }
+    if (bell_available()) { if (!ring_bell(port, windowed)) return 0; }
+    else if (!open_window(port, windowed)) {
+        char tok[96] = ""; winless_port_token(port, tok, sizeof tok);
+        if (getenv("SSH_CONNECTION")) fprintf(stderr, "winless: no window can be opened from this ssh session; reconnect with `winless ssh HOST`\n");
+        else fprintf(stderr, "winless: no Windows browser found; open http://localhost:%d/?t=%s yourself\n", port, tok);
+        return 0;
+    }
     for (int i = 0; i < 100; i++) { if (status_num(port, "clients") > 0) return 1; msleep(200); }
     fprintf(stderr, "winless: the window did not connect (is http://localhost:%d/ reachable from Windows?)\n", port);
     return 0;
@@ -225,6 +254,7 @@ static void usage(FILE *f) {
           "  revise [--id N | --range R1 C1 R2 C2] [--wait]   review status|accept N|reject N|edit N TEXT|finish|cancel   backend claude|api\n"
           "  filter R1 C1 R2 C2 [--lines] COMMAND       (replace a range with the output of a shell command)\n"
           "  windows   (list the open windows)    stop [--all] [--force]    serve | start      --version   --help\n"
+          "  ssh [SSH-OPTIONS] HOST [COMMAND]   a shell on HOST whose `winless open` shows its window on this desktop\n"
           "Each open starts its own server and window; with several open, commands ask which (or use --port N).\n"
           "See winless(1).\n", f);
 }
@@ -248,7 +278,7 @@ static char *read_stdin(size_t *len) {
 /* ---- finding the running servers: each window is its own server, on a port chosen when it was opened ---- */
 static int default_port(void) { const char *e = getenv("WINLESS_DEFAULT_PORT"); int p = e && *e ? atoi(e) : 0; return p > 0 ? p : DEFAULT_PORT; }
 
-static int free_local_port(void) {
+int free_local_port(void) {
     int s = socket(AF_INET, SOCK_STREAM, 0); if (s < 0) return 0;
     struct sockaddr_in a; memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
@@ -399,7 +429,7 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
       if (lj && !json_getbool(lj, "ok", 1)) { const char *e = json_gets(lj, "error", NULL); fprintf(stderr, "winless open: %s\n", e ? e : "refused"); json_free(lj); return 1; }
       json_free(lj); }
     if (!nowin) ensure_window(port, windowed);
-    if (fresh) printf("opened on port %d\n", port);
+    if (fresh) { printf("opened on port %d\n", port); fflush(stdout); }
     if (wait) {
         char path[96]; snprintf(path, sizeof path, "/wait?since=%ld&timeout=86400", since);
         char *r = NULL; size_t rl = 0;
@@ -672,6 +702,8 @@ int client_main(int port, int explicit_port, int argc, char **argv) {
     sb_t b;
 
     if (!strcmp(cmd, "help")) { usage(stdout); return 0; }
+    if (!strcmp(cmd, "ssh")) return remote_ssh_main(ac, av);              /* these two do not talk to a server of their own */
+    if (!strcmp(cmd, "relay")) return remote_relay_main(ac, av);
     int stop_all = !strcmp(cmd, "stop") && ac > 0 && (!strcmp(av[0], "--all") || (ac > 1 && !strcmp(av[1], "--all")));
     if (!strcmp(cmd, "windows") || !strcmp(cmd, "list")) {
         int ports[64], n = list_servers(ports, 64);

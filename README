@@ -41,3 +41,11 @@ Needs libsqlite3 (libsqlite3-dev).
 Revising: mark text while reading (visual mode: n note, s slop, K keep), then `gr` asks a model (claude -p) to address the open notes;
 review the proposed changes in place (n N next, y accept, q reject, c your own wording, Enter finish, Esc cancel).  Accepted changes
 are one undo step, and the file is written and committed if it was clean.  `winless backend claude|api` switches the model backend.
+
+Over ssh: `sshw HOST` (also `winless ssh HOST`) is ssh with winless working on the host: inside it, `winless open FILE` shows the window on your desktop while
+the server, the file, history, git and filters stay on the host.  One ssh connection carries everything (a private socket back to your desktop to ask for the
+window, the port forward for it); a host with no winless gets a static build uploaded on first use (make builds one for this platform into remote/;
+other platforms: ~/.local/share/winless/remote/OS-MACHINE/winless).  See sshw(1).
+
+Security: every server holds a random secret (~/.cache/winless/ports/PORT, mode 0600) and refuses all requests but /ping without it, so other users on a shared
+host, and web pages, cannot drive it.  The command line reads the secret from that file; the window is opened on an address carrying it (traded for a cookie).

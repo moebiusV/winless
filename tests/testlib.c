@@ -146,6 +146,12 @@ int free_port(void) {
 /* ----------------------------------------------------------------------------------------------- the server */
 static double now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9; }
 
+const char *test_token(void) {            /* the secret of the current test server (from its registry file) */
+    static char tok[96];
+    tok[0] = 0; winless_port_token(g_port, tok, sizeof tok);
+    return tok;
+}
+
 static int ping_ok(void) {
     resp_t r = http("GET", "/ping", NULL, 0);
     int ok = r.status == 200 && r.body && strstr(r.body, "\"ok\":true");
@@ -243,7 +249,7 @@ resp_t http(const char *method, const char *path, const char *body, size_t blen)
     int s = connect_server();
     if (s < 0) return r;
     sb_t req; sb_init(&req);
-    sb_printf(&req, "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", method, path, blen);
+    sb_printf(&req, "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nX-Winless-Token: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", method, path, test_token(), blen);
     if (blen) sb_put(&req, body, blen);
     int sent = send_all(s, req.s, req.len);
     sb_free(&req);
@@ -323,7 +329,7 @@ static void sse_pump(sse_t *s, double timeout) {
 sse_t *sse_open(void) {
     int fd = connect_server();
     if (fd < 0) FAIL("cannot connect to the server");
-    const char *req = "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
+    char req[300]; snprintf(req, sizeof req, "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Winless-Token: %s\r\nAccept: text/event-stream\r\n\r\n", test_token());
     if (send_all(fd, req, strlen(req))) FAIL("cannot send the events request");
     sse_t *s = xmalloc(sizeof *s); memset(s, 0, sizeof *s);
     s->fd = fd; sb_init(&s->buf);

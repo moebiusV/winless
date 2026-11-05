@@ -1,0 +1,86 @@
+.TH SSHW 1 "November 2026" "winless 0.2.0" "User Commands"
+.SH NAME
+sshw \- ssh, with winless working on the remote host
+.SH SYNOPSIS
+.B sshw
+[\fIssh-options\fR] \fIhost\fR [\fIcommand\fR]
+.br
+.B winless ssh
+[\fIssh-options\fR] \fIhost\fR [\fIcommand\fR]
+.SH DESCRIPTION
+.B sshw
+is
+.BR ssh (1)
+for a person who also uses
+.BR winless (1).
+It gives you the shell (or runs the command) you would get from ssh, and inside it
+.B winless open FILE
+shows the file in a window on your desktop, while the editing, writing, history, git commits, filters and model revisions all happen
+on the host, next to the file. Nothing needs setting up by hand: the tunnels, the servers and the window are started when needed.
+.PP
+Every option and argument is passed to ssh as you typed it (\-p, \-i, \-J, \-o, user@host, a command ...), so
+.B alias ssh=sshw
+works for interactive use.
+.SH HOW IT WORKS
+.B sshw
+opens one ssh connection that stays up for the session (ssh's ControlMaster; you authenticate once, as usual, and your ~/.ssh/config
+applies). Through it, a private unix socket is forwarded from the host back to a small relay process on your desktop, and the host's
+shell gets $WINLESS_BELL naming that socket.
+.PP
+On the host,
+.B winless open
+starts its server beside the file as it always does. Having no screen, it then rings the bell: the relay forwards the server's port to
+your desktop (with
+.BR "ssh \-O forward" ,
+through the same connection, so no further login) and opens the window there. The window is opened on an address that carries the
+server's secret, which the server trades for a cookie; the forward is removed when the server goes away. Closing the shell ends the
+connection and the relay.
+.SH HOSTS WITHOUT WINLESS
+On connecting,
+.B sshw
+asks the host what it is (uname \-sm) and whether a login shell there already finds a winless that knows about this (winless \-\-features
+prints "bell"). If not, it uploads its own: a static binary built for that platform, and viewer.html, into
+~/.cache/winless/remote/HASH/ on the host (once; later sessions find them there), and puts that directory first on the PATH of the
+shell it starts. The bytes travel through an ssh exec channel without a terminal, which is 8-bit clean, and the uploaded program is run
+once on the host to prove it works there.
+.PP
+.B make
+builds the static binary for the machine it runs on (it needs libc.a and libsqlite3.a) as remote/OS\-MACHINE/winless, and
+.B make install
+puts it under the data directory. For other platforms, build winless there (or cross-build it) and place it at
+~/.local/share/winless/remote/OS\-MACHINE/winless, e.g. Linux\-aarch64. If there is none, the shell still starts; only winless is
+missing on the host.
+.SH OPTIONS
+Options that would interfere with the connection that sshw manages (\-M \-S \-N \-f \-O \-W) are refused.
+.SH ENVIRONMENT
+.TP
+.B WINLESS_SSH
+The ssh program to run (default: ssh).
+.TP
+.B WINLESS_REMOTE_DIR
+An extra directory searched for the binaries to upload: DIR/OS\-MACHINE/winless.
+.TP
+.B WINLESS_BELL
+Set by sshw in the host's shell: the socket the host's winless rings to ask your desktop for a window.
+.TP
+.B WINLESS_BROWSER
+The browser used for the window (on your desktop), as for winless.
+.SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/winless/ID/
+The session's control socket, bell socket and relay log (or /tmp/winless\-UID/ID/); removed when the session ends.
+.TP
+.I ~/.cache/winless/remote/HASH/
+On the host: the uploaded winless and viewer.html.
+.TP
+.I ~/.cache/winless/ports/PORT
+On the host: a server's process id and its secret, readable by you only.
+.SH SECURITY
+Each winless server holds a random secret and refuses every request (except /ping) that does not carry it: the command line reads it from
+a file only you can read, and a window is given it in the address it is opened with. Other users of the same host cannot drive your servers
+(which can run filters and write files), nor can web pages, which are also refused by Host and Origin.
+.SH SEE ALSO
+.BR winless (1),
+.BR ssh (1)
+.SH AUTHOR
+David Walther.

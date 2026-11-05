@@ -21,22 +21,32 @@ INSTALL_DATA = @INSTALL_DATA@
 
 WARN = -Wall -Wextra -Wpedantic
 DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\"
-OBJS = main.o client.o server.o json.o util.o edit.o edits.o llm.o store.o
-DIST_FILES = main.c client.c server.c json.c util.c edit.c edits.c llm.c store.c winless.h viewer.html winless.1 configure configure.ac Makefile.in \
+SRCS = main.c client.c server.c remote.c json.c util.c edit.c edits.c llm.c store.c
+OBJS = main.o client.o server.o remote.o json.o util.o edit.o edits.o llm.o store.o
+DIST_FILES = main.c client.c server.c remote.c json.c util.c edit.c edits.c llm.c store.c winless.h viewer.html winless.1 sshw.1 configure configure.ac Makefile.in \
              install-sh README COPYING AUTHORS NEWS ChangeLog INSTALL tests/testlib.h tests/testlib.c tests/test_unit.c \
-             tests/test_server.c tests/test_cli.c tests/test_revise.c
+             tests/test_server.c tests/test_cli.c tests/test_revise.c tests/test_remote.c
 
-all: winless
+all: winless remote-stamp
 
 winless: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+# A static build for this platform, which `sshw` uploads to hosts that have no winless (remote/<Os>-<machine>/winless).  It is optional:
+# without libc.a and libsqlite3.a it is skipped, and sshw then works only on hosts that already have winless.
+remote-stamp: $(SRCS) winless.h
+	@key=`uname -sm | tr ' ' '-'`; mkdir -p remote/$$key; \
+	if $(CC) -std=c11 -static $(DEFS) $(CPPFLAGS) $(CFLAGS) -o remote/$$key/winless $(SRCS) $(LIBS) -lpthread -ldl >/dev/null 2>&1; then \
+	  echo "built remote/$$key/winless (what sshw uploads to hosts without winless)"; \
+	else rm -rf remote; echo "note: no static build here (needs libc.a and libsqlite3.a); sshw will work only on hosts that already have winless"; fi; \
+	touch remote-stamp
 
 %.o: %.c winless.h Makefile
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 # The tests are C programs (tests/*.c): unit tests of json.c/util.c, and black-box tests that start the real winless
 # binary.  `make check` builds and runs them; sh only invokes them.
-TEST_PROGS = tests/test_unit tests/test_server tests/test_cli tests/test_revise
+TEST_PROGS = tests/test_unit tests/test_server tests/test_cli tests/test_revise tests/test_remote
 TEST_OBJS = tests/testlib.o
 
 tests/%.o: tests/%.c tests/testlib.h winless.h Makefile
@@ -51,6 +61,8 @@ tests/test_cli: tests/test_cli.o $(TEST_OBJS) json.o util.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_cli.o $(TEST_OBJS) json.o util.o $(LIBS)
 tests/test_revise: tests/test_revise.o $(TEST_OBJS) json.o util.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_revise.o $(TEST_OBJS) json.o util.o $(LIBS)
+tests/test_remote: tests/test_remote.o $(TEST_OBJS) json.o util.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_remote.o $(TEST_OBJS) json.o util.o $(LIBS)
 
 RUN_TESTS = for t in $(TEST_PROGS); do echo "== $$t"; WINLESS_BIN=$(CURDIR)/winless WINLESS_HTML=$(srcdir)/viewer.html ./$$t || exit 1; done
 
@@ -75,9 +87,13 @@ install: all
 	$(INSTALL_PROGRAM) winless $(DESTDIR)$(bindir)/winless
 	$(INSTALL_DATA) $(srcdir)/viewer.html $(DESTDIR)$(pkgdatadir)/viewer.html
 	$(INSTALL_DATA) $(srcdir)/winless.1 $(DESTDIR)$(mandir)/man1/winless.1
+	$(INSTALL_DATA) $(srcdir)/sshw.1 $(DESTDIR)$(mandir)/man1/sshw.1
+	ln -sf winless $(DESTDIR)$(bindir)/sshw
+	for d in remote/*/; do [ -f "$${d}winless" ] || continue; \
+	  $(srcdir)/install-sh -d $(DESTDIR)$(pkgdatadir)/$${d}; $(INSTALL_PROGRAM) "$${d}winless" $(DESTDIR)$(pkgdatadir)/$${d}winless; done
 
 uninstall:
-	rm -f $(DESTDIR)$(bindir)/winless $(DESTDIR)$(mandir)/man1/winless.1
+	rm -f $(DESTDIR)$(bindir)/winless $(DESTDIR)$(bindir)/sshw $(DESTDIR)$(mandir)/man1/winless.1 $(DESTDIR)$(mandir)/man1/sshw.1
 	rm -rf $(DESTDIR)$(pkgdatadir)
 
 dist:
@@ -89,7 +105,8 @@ dist:
 	@echo "created $(PACKAGE)-$(VERSION).tar.gz"
 
 clean:
-	rm -f winless $(OBJS) $(TEST_PROGS) tests/*.o
+	rm -f winless $(OBJS) $(TEST_PROGS) tests/*.o remote-stamp
+	rm -rf remote
 
 distclean: clean
 	rm -f Makefile config.log config.status $(PACKAGE)-*.tar.gz

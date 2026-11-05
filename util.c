@@ -85,6 +85,38 @@ void winless_cache_dir(char *buf, size_t n) {
     mkdir(buf, 0755);
 }
 
+void winless_port_file(int port, char *buf, size_t n, int create) {
+    char dir[1024]; winless_cache_dir(dir, sizeof dir);
+    char pd[1100]; snprintf(pd, sizeof pd, "%s/ports", dir);
+    if (create) { mkdir(pd, 0700); chmod(pd, 0700); }              /* the files in it hold secrets */
+    snprintf(buf, n, "%s/%d", pd, port);
+}
+
+int winless_port_token(int port, char *buf, size_t n) {
+    char f[1300]; winless_port_file(port, f, sizeof f, 0);
+    FILE *fp = fopen(f, "r"); if (!fp) return 0;
+    char l1[64] = "", l2[160] = "";
+    int ok = fgets(l1, sizeof l1, fp) && fgets(l2, sizeof l2, fp);
+    fclose(fp);
+    if (!ok) return 0;
+    size_t k = strlen(l2); while (k && (l2[k - 1] == '\n' || l2[k - 1] == '\r')) l2[--k] = 0;
+    if (k < 16 || k >= n) return 0;
+    memcpy(buf, l2, k + 1);
+    return 1;
+}
+
+int token_make(char *buf, size_t n) {
+    unsigned char raw[32];
+    if (n < 65) return 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (!f) return 0;
+    size_t got = fread(raw, 1, sizeof raw, f);
+    fclose(f);
+    if (got != sizeof raw) return 0;
+    for (size_t i = 0; i < sizeof raw; i++) snprintf(buf + 2 * i, 3, "%02x", raw[i]);
+    return 1;
+}
+
 char *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;

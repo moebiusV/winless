@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static jv *post_json(const char *path, const char *body) {
     char *r = post_ok(path, body);
@@ -176,7 +177,7 @@ static void t_page_state_is_readable_and_resumes(void) {
 }
 
 static void t_quit_event_releases_a_waiting_request(void) {
-    char path[192]; snprintf(path, sizeof path, "GET /wait?since=%ld&timeout=10 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", status_seq());
+    char path[320]; snprintf(path, sizeof path, "GET /wait?since=%ld&timeout=10 HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Winless-Token: %s\r\nConnection: close\r\n\r\n", status_seq(), test_token());
     int fd = raw_connect();
     raw_send(fd, path, strlen(path));
     size_t n;
@@ -260,15 +261,19 @@ static void t_stop_command_ends_the_server(void) {
 }
 
 /* A web page from somewhere else, or a hostname rebound to 127.0.0.1, must not be able to use the server (it can edit, write and run filters). */
-static char *raw_request(const char *method, const char *host, const char *origin, const char *body) {
+static char *raw_request_as(const char *method, const char *host, const char *origin, const char *body, const char *token) {
     char req[1024];
     int n = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\n", method, body ? "/cmd" : "/ping");
     if (host) n += snprintf(req + n, sizeof req - (size_t)n, "Host: %s\r\n", host);
     if (origin) n += snprintf(req + n, sizeof req - (size_t)n, "Origin: %s\r\n", origin);
+    if (token) n += snprintf(req + n, sizeof req - (size_t)n, "X-Winless-Token: %s\r\n", token);
     n += snprintf(req + n, sizeof req - (size_t)n, "Connection: close\r\nContent-Length: %zu\r\n\r\n%s", body ? strlen(body) : 0, body ? body : "");
     int fd = raw_connect(); raw_send(fd, req, (size_t)n);
     size_t len; char *reply = raw_read(fd, 5, &len); raw_close(fd);
     return reply;
+}
+static char *raw_request(const char *method, const char *host, const char *origin, const char *body) {
+    return raw_request_as(method, host, origin, body, test_token());
 }
 
 static void t_only_local_pages_may_use_the_server(void) {
@@ -290,6 +295,56 @@ static void t_only_local_pages_may_use_the_server(void) {
     r = raw_request("GET", "[::1]", NULL, NULL);                   CHECK_CONTAINS(r, "200 OK"); free(r);
 }
 
+/* Anyone who can reach the port (another user on a shared machine) must not be able to run filters: every request but /ping needs the secret. */
+static char *raw_get(const char *path, const char *extra_headers) {
+    char req[1024];
+    int n = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: localhost:%d\r\n%sConnection: close\r\n\r\n", path, g_port, extra_headers);
+    int fd = raw_connect(); raw_send(fd, req, (size_t)n);
+    size_t len; char *reply = raw_read(fd, 5, &len); raw_close(fd);
+    return reply;
+}
+
+static void t_the_secret_is_required(void) {
+    const char *cmd = "{\"cmd\":\"flash\",\"text\":\"x\"}";
+    char *r;
+    r = raw_request_as("POST", "127.0.0.1", NULL, cmd, NULL);            CHECK_CONTAINS(r, "403"); free(r);       /* no secret */
+    r = raw_request_as("POST", "127.0.0.1", NULL, cmd, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); CHECK_CONTAINS(r, "403"); free(r);   /* wrong */
+    r = raw_request_as("POST", "127.0.0.1", NULL, cmd, "short");         CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_request_as("GET", "127.0.0.1", NULL, NULL, NULL);            CHECK_CONTAINS(r, "200 OK"); free(r);    /* /ping needs none */
+    r = raw_get("/status", "");                                          CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_get("/content", "");                                         CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_get("/", "");                                                CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_get("/?t=nope", "");                                         CHECK_CONTAINS(r, "403"); free(r);
+    /* the window's way in: /?t=SECRET sets a cookie and sends it on to / ; the cookie then opens the rest */
+    char path[160]; snprintf(path, sizeof path, "/?t=%s", test_token());
+    r = raw_get(path, "");
+    CHECK_CONTAINS(r, "302"); CHECK_CONTAINS(r, "Location: /"); CHECK_CONTAINS(r, "HttpOnly"); CHECK_CONTAINS(r, "SameSite=Strict");
+    char ck[200]; snprintf(ck, sizeof ck, "Cookie: other=1; wl-%d=%s\r\n", g_port, test_token());
+    free(r);
+    r = raw_get("/status", ck);                                          CHECK_CONTAINS(r, "200 OK"); free(r);
+    r = raw_get("/", ck);                                                CHECK_CONTAINS(r, "200 OK"); free(r);
+    /* through an ssh forward the port differs from ours: fine with the secret, refused without it */
+    char fwd[200]; int n = snprintf(fwd, sizeof fwd, "GET /status HTTP/1.1\r\nHost: localhost:%d\r\nX-Winless-Token: %s\r\nConnection: close\r\n\r\n", g_port + 1, test_token());
+    int fd = raw_connect(); raw_send(fd, fwd, (size_t)n); size_t len; r = raw_read(fd, 5, &len); raw_close(fd);
+    CHECK_CONTAINS(r, "200 OK"); free(r);
+    n = snprintf(fwd, sizeof fwd, "GET /status HTTP/1.1\r\nHost: localhost:%d\r\nConnection: close\r\n\r\n", g_port + 1);
+    fd = raw_connect(); raw_send(fd, fwd, (size_t)n); r = raw_read(fd, 5, &len); raw_close(fd);
+    CHECK_CONTAINS(r, "403"); free(r);
+    /* the secret does not make another site's page welcome */
+    r = raw_request_as("POST", "localhost", "http://evil.example", cmd, test_token()); CHECK_CONTAINS(r, "403"); free(r);
+    r = raw_request_as("POST", "evil.example", NULL, cmd, test_token());               CHECK_CONTAINS(r, "403"); free(r);
+}
+
+static void t_the_secret_file_is_private(void) {
+    char f[1300]; winless_port_file(g_port, f, sizeof f, 0);
+    struct stat st; CHECK(stat(f, &st) == 0);
+    CHECK_INT(st.st_mode & 077, 0);                                      /* no access for group or others */
+    char dir[1300]; snprintf(dir, sizeof dir, "%s", f); *strrchr(dir, '/') = 0;
+    CHECK(stat(dir, &st) == 0);
+    CHECK_INT(st.st_mode & 077, 0);
+    CHECK_INT(strlen(test_token()), 64);
+}
+
 int main(void) {
     testlib_init();
     static const testcase tests[] = {
@@ -307,6 +362,8 @@ int main(void) {
         { "page_state_is_readable_and_resumes", t_page_state_is_readable_and_resumes, 1 },
         { "quit_event_releases_a_waiting_request", t_quit_event_releases_a_waiting_request, 1 },
         { "only_local_pages_may_use_the_server", t_only_local_pages_may_use_the_server, 1 },
+        { "the_secret_is_required", t_the_secret_is_required, 1 },
+        { "the_secret_file_is_private", t_the_secret_file_is_private, 1 },
         { "wait_times_out", t_wait_times_out, 1 },
         { "closed_event_also_releases_wait", t_closed_event_also_releases_wait, 1 },
         { "disconnected_page_is_dropped_at_once", t_disconnected_page_is_dropped_at_once, 1 },

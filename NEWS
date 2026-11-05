@@ -1,6 +1,13 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Over ssh: `sshw HOST` (or `winless ssh HOST`) is ssh with winless working on the host.  One ssh connection (ControlMaster) carries a private unix
+  socket back to a relay on your desktop and, on demand, the port forward for each window; on the host `winless open` starts its server beside the file and
+  rings the bell ($WINLESS_BELL) instead of launching a browser.  A host without winless gets a static build uploaded once (make builds remote/OS-MACHINE/winless;
+  more platforms: ~/.local/share/winless/remote/).  New: sshw(1), winless --features.
+  Security: every server has a random secret (~/.cache/winless/ports/PORT, mode 0600); all requests but /ping must carry it (header, or a cookie obtained from
+  /?t=SECRET, which is how the window is opened).  With it a forwarded port is accepted; without it nothing is, so other users of a shared host cannot run filters
+  through your server.  `open` now prints "opened on port N" at once when its output is not a terminal.
   Revising with a model: mark text (n note, s slop, K keep), then `gr` hands the open notes to a model (claude -p by default; background job,
   Esc cancels) which answers with a list of edits.  winless verifies each edit (the text must occur exactly once and not touch a keep or
   another edit), shows the changes in place with word-level highlights, and you decide: n N y q c Y Enter Esc.  Finishing applies the
