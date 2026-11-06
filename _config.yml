@@ -1,4 +1,4 @@
-# GitHub Pages (https://moebiusv.github.io/winless/): the front page is the README itself, pulled in by index.md.
+# GitHub Pages (https://moebiusv.github.io/winless/): README.md is the front page.
 title: winless
 description: A "less" in its own window, drivable from the shell, and usable over ssh
 theme: jekyll-theme-minimal
