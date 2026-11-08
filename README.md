@@ -1,7 +1,7 @@
 winless -- a "less" in its own window, drivable from the shell
 ===============================================================
 
-[up](https://moebiusv.github.io/) | [github.com/moebiusV/winless](https://github.com/moebiusV/winless) | `git clone https://github.com/moebiusV/winless`
+[project index](https://moebiusv.github.io/) | [github.com/moebiusV/winless](https://github.com/moebiusV/winless) | `git clone https://github.com/moebiusV/winless`
 
 winless shows a text file in a chromeless browser window (full screen by default) with the keys of less, and lets a
 script or another program drive it: jump to a line, search and highlight, shade line ranges, send keys, and read back
