@@ -1,6 +1,9 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Sorting a list (mutt's o): `o` then d c r p t sorts by the date of the last message, the date created, rounds, platform or title (a capital
+  reverses), `:sort KEY [reverse]` does the same, plain `:sort` clears it.  The viewer asks the source for the list with a `sort` filter, so
+  each order is a new view (Alt-Left goes back) and P and f keep it; the bar shows `sort: rounds.desc`.  The hint row lists `o sort`.
   Lists, pine style: a row of key hints above the bar in a list, a log, or a thread opened from one (`:set nohints` / `:set hints`),
   and a bar that says "entry 12 of 3094 (0%)" or "message 120 of 3000 (4%)" instead of line numbers; the bar of the list stays on
   the entry you are in while the cursor walks its body, and the cursor's row is barred in a log.  `?` opens the help in a list or

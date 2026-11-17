@@ -7,7 +7,7 @@ const a = src.indexOf("const MD = {"), b = src.indexOf("function toggleMarkdown"
 assert(a > 0 && b > a, "markdown section not found in viewer.html");
 const S = { markdown: true, lines: [] };
 const lcp = i => Array.from(S.lines[i] || "");
-const mod = new Function("S", "lcp", "setCursor", src.slice(a, b) + "; return { mdParse, mdSnap, mdLine, MD, bareUrls, linkAt, safeUrl, OL, olInfo, olToggle, olAll, olKey, olArg, olTitle, olReveal, stHeader, viewArg, olPlatform, stInfo, barPos, hintKeys };")(S, lcp, (r, c) => { S.cur = { r, c }; });
+const mod = new Function("S", "lcp", "setCursor", src.slice(a, b) + "; return { mdParse, mdSnap, mdLine, MD, bareUrls, linkAt, safeUrl, OL, olInfo, olToggle, olAll, olKey, olArg, olTitle, olReveal, stHeader, viewArg, olPlatform, stInfo, barPos, hintKeys, sortSpec, sortFromWords, sortView, mkView };")(S, lcp, (r, c) => { S.cur = { r, c }; });
 let n = 0, bad = 0;
 function t(name, fn) { n++; try { fn(); console.log("ok   " + name); } catch (e) { bad++; console.log("FAIL " + name + "\n     " + e.message); } }
 
@@ -188,7 +188,7 @@ S.outline = false; S.stream = false;
 const keysOf = () => mod.hintKeys().map(([k]) => k).join(" ");
 t("a list with a hook hints at reading, folding, limiting and narrowing", () => {
   S.outline = true; S.stream = false; S.hasHook = true; S.back = [];
-  assert.strictEqual(keysOf(), "Enter Tab f P m S ? q");
+  assert.strictEqual(keysOf(), "Enter Tab f o P m S ? q");
   assert.deepStrictEqual(mod.hintKeys()[0], ["Enter", "read"]); assert.deepStrictEqual(mod.hintKeys().at(-1), ["q", "quit"]);
 });
 t("a list without a hook can only fold, so Enter says fold and the narrowing keys are not offered", () => {
@@ -207,6 +207,48 @@ t("a thread opened from a list: back to the list, and F1 for help because ? is t
 });
 t("a plain text has no hint row", () => { S.outline = false; S.stream = false; S.back = []; assert.deepStrictEqual(mod.hintKeys(), []); });
 S.back = [];
+
+// sorting (mutt's o): the letters, :sort, and the view that asks the source for another order
+t("o then a letter picks the column; its natural direction is biggest first for dates and rounds, A to Z for text", () => {
+  assert.deepStrictEqual(["d", "c", "r", "p", "t"].map(mod.sortSpec), ["last.desc", "created.desc", "rounds.desc", "platform.asc", "title.asc"]);
+});
+t("a capital letter reverses the direction", () => {
+  assert.deepStrictEqual(["D", "C", "R", "P", "T"].map(mod.sortSpec), ["last.asc", "created.asc", "rounds.asc", "platform.desc", "title.desc"]);
+});
+t("any other key is not a sort key", () => { for (const k of ["x", "", "dd", "Enter", "Escape", "1", " ", null, undefined]) assert.strictEqual(mod.sortSpec(k), null, String(k)); });
+t(":sort takes a key, a direction, or reverse; plain :sort clears the order", () => {
+  const f = mod.sortFromWords;
+  assert.strictEqual(f("rounds"), "rounds.desc"); assert.strictEqual(f("title"), "title.asc");
+  assert.strictEqual(f("title reverse"), "title.desc"); assert.strictEqual(f("rounds rev"), "rounds.asc");
+  assert.strictEqual(f("rounds.asc"), "rounds.asc"); assert.strictEqual(f("rounds.asc reverse"), "rounds.desc");
+  assert.strictEqual(f(""), ""); assert.strictEqual(f("   "), ""); assert.strictEqual(f(undefined), "");
+  for (const bad of ["bogus", "ROUNDS", "rounds.up", "rounds reverse reverse", "title.", "date"]) assert.strictEqual(f(bad), null, bad);
+});
+t("sorting asks for the same list with a sort filter, and names it in the title", () => {
+  S.vf = {}; S.vtext = "";
+  const v = mod.sortView("rounds.desc");
+  assert.deepStrictEqual([v.arg, v.title, v.filters, v.text, v.kind], ["list:sort:rounds.desc", "sort: rounds.desc threads", { sort: "rounds.desc" }, "", "list"]);
+});
+t("sorting keeps the platform and the pattern in force, and a new sort replaces the old one", () => {
+  S.vf = { platform: "grok" }; S.vtext = "";
+  assert.strictEqual(mod.sortView("title.asc").arg, "list:platform:grok:sort:title.asc");
+  S.vf = { limit: true, sort: "rounds.desc" }; S.vtext = "~u shekel";
+  const v = mod.sortView("created.asc"); assert.deepStrictEqual([v.arg, v.text, v.filters], ["list:limit:sort:created.asc", "~u shekel", { limit: true, sort: "created.asc" }]);
+  S.vf = {}; S.vtext = "";
+});
+t("clearing the order asks for the list without a sort filter", () => {
+  S.vf = { sort: "rounds.desc", platform: "grok" }; S.vtext = "";
+  const v = mod.sortView(""); assert.deepStrictEqual([v.arg, v.filters], ["list:platform:grok", { platform: "grok" }]);
+  S.vf = { sort: "rounds.desc" }; assert.strictEqual(mod.sortView("").arg, "list:all");
+  S.vf = {};
+});
+t("narrowing by platform keeps the sort order", () => {
+  S.outline = true; S.stream = false; outline(["* 2026-01-01  2026-01-02   2r  grok    Some title  #77", "  body"]); S.cur = { r: 0, c: 0 };
+  S.vf = { sort: "rounds.desc" }; const v = mod.viewArg("P");
+  assert.deepStrictEqual([v.arg, v.filters], ["list:sort:rounds.desc:platform:grok", { sort: "rounds.desc", platform: "grok" }]);
+  S.vf = {};
+});
+t("the hint row offers o sort in a list that has a hook", () => { S.outline = true; S.stream = false; S.hasHook = true; S.back = []; assert(keysOf().split(" ").includes("o")); });
 
 // A `case` label written after a `//` on the same line is part of the comment: the key silently does nothing
 // (this once killed `:` and `?` in normal mode, and no test sends keys).

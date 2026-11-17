@@ -155,6 +155,11 @@ brings it back), and a bar that says which entry or message the cursor is in, of
 The bar of the list stays on the entry you are in, dimmer while the cursor walks its body lines.
 .B ?
 opens the help in a list or a log (F1 and :help anywhere); in a text it is the backward search.
+.B o
+then a letter sorts a list as in mutt: d date of the last message, c date created, r rounds, p platform, t title; a capital reverses
+(R: fewest rounds first).  \fB:sort\fR \fIKEY\fR [\fBreverse\fR] does the same, plain \fB:sort\fR goes back to the default order.  Each order is a
+new view, so Alt-Left returns to the previous one; narrowing (P, f) keeps it.  The list's source does the sorting (for example, the
+\fBsort\fR filter).
 .B :
 opens the command line.  q still quits the window; Alt-Left and Alt-Right go back and forward.
 .SH ANNOTATIONS

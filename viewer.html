@@ -344,11 +344,32 @@ function vfArg(kind, f) {            // {platform:"grok", search:true} -> "strea
   const e = Object.entries(f || {}); return kind + ":" + (e.length ? e.map(([k, v]) => v === true ? k : k + ":" + v).join(":") : "all");
 }
 function vfTitle(kind, f, text) {
-  const w = []; for (const [k, v] of Object.entries(f || {})) w.push(k === "search" ? JSON.stringify(text || "") : k === "limit" ? "limit: " + (text || "") : k === "thread" ? "thread " + v : v);
+  const w = []; for (const [k, v] of Object.entries(f || {})) w.push(k === "search" ? JSON.stringify(text || "") : k === "limit" ? "limit: " + (text || "") : k === "thread" ? "thread " + v : k === "sort" ? "sort: " + v : v);
   return (w.length ? w.join(" · ") + " " : "all ") + (kind === "list" ? "threads" : "messages");
 }
+const SORT_LETTERS = { d: "last", c: "created", r: "rounds", p: "platform", t: "title" };      // mutt's o: the letter picks the column
+const SORT_NATURAL = { last: "desc", created: "desc", rounds: "desc", platform: "asc", title: "asc" };     // dates and rounds run biggest first, text A to Z
+function sortSpec(ch) {              // o then d c r p t -> "last.desc" ...; a capital reverses the natural direction; null for any other key
+  if (typeof ch !== "string" || ch.length !== 1) return null;
+  const key = SORT_LETTERS[ch.toLowerCase()]; if (!key) return null;
+  const nat = SORT_NATURAL[key], rev = ch !== ch.toLowerCase();
+  return key + "." + (rev ? (nat === "desc" ? "asc" : "desc") : nat);
+}
+function sortFromWords(w) {          // :sort rounds | :sort title reverse | :sort rounds.asc; "" (just :sort) clears the order; null when it is not a sort
+  w = (w || "").trim(); if (!w) return "";
+  const m = /^(last|created|rounds|platform|title)(?:\.(asc|desc))?(?:\s+(rev|reverse))?$/.exec(w); if (!m) return null;
+  let dir = m[2] || SORT_NATURAL[m[1]]; if (m[3]) dir = dir === "desc" ? "asc" : "desc";
+  return m[1] + "." + dir;
+}
+function mkView(kind, f, text) {     // the view a key asks for: the argument, the title, the filters (which add up) and the free text a search or limit needs
+  return { arg: vfArg(kind, f), title: vfTitle(kind, f, text), filters: f, text: (f.search || f.limit) ? text : "", kind };
+}
+function sortView(spec) {            // the list as it is, in another order (spec "" = the default order); a pattern that is in force is kept
+  const f = { ...S.vf }; if (spec) f.sort = spec; else delete f.sort;
+  return mkView("list", f, S.vtext);
+}
 function viewArg(k) {                // for a key that opens another view: {arg, title, filters, text}, else null.  Filters add up: P after U keeps the speaker.
-  const mk = (kind, f, text) => ({ arg: vfArg(kind, f), title: vfTitle(kind, f, text), filters: f, text: (f.search || f.limit) ? text : "", kind });
+  const mk = mkView;
   if (S.outline) {
     const h = olInfo().owner[S.cur.r], id = h >= 0 ? olArg(h) : null, pl = h >= 0 ? olPlatform(h) : null;
     if (k === "P" && pl) return mk("list", { ...S.vf, platform: pl }, S.vtext);
@@ -385,7 +406,7 @@ function hintKeys() {                // pine's key hints for the view: [[key, wh
   const back = S.back.length ? [["Alt-\u2190", "back"]] : [];
   if (S.outline) {
     if (!S.hasHook) return [["Tab", "fold"], ["Enter", "fold"], ["/", "limit"], ["?", "help"], ["q", "quit"]];
-    return [["Enter", "read"], ["Tab", "fold"], ["f", "limit"], ["P", "platform"], ["m", "log"], ["S", "stream"], ...back, ["?", "help"], ["q", "quit"]];
+    return [["Enter", "read"], ["Tab", "fold"], ["f", "limit"], ["o", "sort"], ["P", "platform"], ["m", "log"], ["S", "stream"], ...back, ["?", "help"], ["q", "quit"]];
   }
   if (S.stream) return [["Enter", "thread"], ["P", "platform"], ["U", "speaker"], ["o", "read"], ["L", "list"], ["f", "limit"], ...back, ["?", "help"], ["q", "quit"]];
   if (S.back.length) return [["Alt-\u2190", "back to the list"], ["/", "search"], ["n", "next"], ["F1", "help"], ["q", "quit"]];      // a thread opened from a list; there ? is the backward search
@@ -667,6 +688,7 @@ function runPrompt(ch, v) {
     if ((m = /^([%*.$0-9,'<>]*)s([^\w\s\\"|].*)$/.exec(v))) { substitute(m[1], m[2][0], m[2].slice(1)); return; }
     if (v === "annotations") { showAnnotations(); return; }
     if ((m = /^(?:limit|narrow)\s+(.+)$/.exec(v))) { narrow(m[1]); return; }
+    if ((m = /^sort(?:\s+(.*))?$/.exec(v))) { const spec = sortFromWords(m[1]); if (spec === null) flash("sort by: last, created, rounds, platform or title (add .asc, .desc or reverse)"); else sortList(spec); return; }
     if ((m = /^revise(?:\s+(\d+))?$/.exec(v))) { startRevise(m[1] ? { id: +m[1] } : {}); return; }
     if ((m = /^set backend (claude|api)$/.exec(v))) { sendCmd({ cmd: "backend", value: m[1] }).then(j => flash(j.ok ? "backend: " + m[1] : j.error)); return; }
     if ((m = /^annotate\s+(.+)$/.exec(v))) { saveAnnotation({ file: true }, m[1]).then(() => 0); return; }
@@ -951,6 +973,11 @@ function narrow(text) {              // :limit PATTERN (or :narrow) -- like mutt
   const f = { ...S.vf, limit: true }; delete f.search;                 // a new pattern replaces the old one
   hookOpen(vfArg(kind, f), text, vfTitle(kind, f, text), f);
 }
+function sortList(spec) {            // o + letter, or :sort -- the list in another order, as a new view (Alt-Left returns to the old order)
+  if (!S.outline) { flash("sorting works in a list"); return; }
+  const v = sortView(spec);
+  hookOpen(v.arg, v.text || null, v.title, v.filters);
+}
 const MUTATING = new Set(["edit", "undo", "redo", "write", "filter", "annotate", "unannotate", "revise", "review", "revert", "backend"]);
 function tryQuit(force) { if (S.dirty && !force) flash("unsaved changes: :wq saves and quits, :q! discards them and quits"); else quit(); }
 function setRegister(text, linewise) {
@@ -1001,7 +1028,8 @@ function pendingKey(k) {             // g, z and r prefixes in normal mode
     else if (k === "v") reselect();
     else if (k === "x") { const u = linkAt(S.cur.r, S.cur.c, true); if (u) openLink(u); else flash("no link on this line"); }     // gx, as in vim
     else if (k === "r") startRevise({});                                              // gr: revise this file from its open notes
-  } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); else if (k === "m") toggleMarkdown(); else if (S.outline) olZ(k); }
+  } else if (p === "o") { const spec = sortSpec(k); if (spec) sortList(spec); else if (k !== "Escape") flash("not a sort key: d c r p t"); }
+  else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); else if (k === "m") toggleMarkdown(); else if (S.outline) olZ(k); }
   else if (p === "!") { if (k === "!") openPrompt(":", ".!"); }                           // !! filters the current line
   else if (p === "]" || p === "[") { if (k === "a") nextAnnotation(p === "]" ? 1 : -1); }
   else if (p === "r") {
@@ -1015,6 +1043,7 @@ function normKey(k) {
   if (S.pend) return pendingKey(k);
   if (countKey(k)) return true;
   if ((S.outline || S.stream) && k === "f") { openPrompt(":", "limit "); return true; }          // as mutt's l: type a pattern
+  if (S.outline && k === "o" && S.hasHook) { S.pend = "o"; setMode(); flash("sort by: d last date, c created, r rounds, p platform, t title (a capital reverses; Esc cancels)"); return true; }      // as mutt's o
   if (S.outline || S.stream) { const va = viewArg(k); if (va) { hookOpen(va.arg, va.text || null, va.title, va.filters); return true; } }
   if (S.outline && olKey(k)) return true;
   switch (k) {
@@ -1493,6 +1522,7 @@ const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table
 <tr><td><b>click</b> a link, or <b>gx</b></td><td>open the link under the cursor (or the next one on the line): markdown links and http(s):// / mailto: addresses</td></tr>
 <tr><td><b>P</b> <b>S</b> <b>m</b> in a list, <b>Enter</b> <b>P</b> <b>U</b> <b>o</b> <b>L</b> <b>S</b> in a stream, <b>f</b> or <b>:limit PATTERN</b> (and <b>/</b> in the list)</td><td>narrow the list or stream to a platform, thread, speaker or a pattern, or switch between the list and the stream; <b>Alt-Left</b> widens it again.  A pattern is like mutt's: <b>word</b> anywhere, <b>~s</b> title or summary, <b>~b</b> any message, <b>~u</b> what you said, <b>~a</b> what the LLM replied, <b>~k</b> thinking, <b>~p</b> platform, <b>~d</b> / <b>~c</b> last / first date (2026-03..2026-06, &gt;2026-03-05, &lt;2w), <b>~r</b> rounds (&gt;10); space = and, <b>|</b> or, <b>!</b> not, ( ) group; e.g. <b>~u shekel !~a talent ~d 2026</b></td></tr>
 <tr><td><b>Tab</b> / <b>l</b> <b>h</b> on an entry</td><td>in a list (--outline): open / close the entry; <b>za zo zc zR zM</b> as in vim; <b>Enter</b> opens the thread here; <b>Alt-Left</b> comes back to the list as you left it, <b>Alt-Right</b> goes forward again (<b>q</b> quits)</td></tr>
+<tr><td><b>o</b> then <b>d c r p t</b> in a list; <b>:sort KEY</b></td><td>sort the list as in mutt: <b>d</b> date of the last message, <b>c</b> date created, <b>r</b> rounds, <b>p</b> platform, <b>t</b> title; a capital reverses (<b>R</b> fewest rounds first); <b>:sort title reverse</b>, <b>:sort rounds.asc</b>, <b>:sort</b> alone back to newest first. Each order is a new view: Alt-Left returns to the previous one, and <b>P</b> and <b>f</b> keep it</td></tr>
 <tr><td><b>?</b> in a list or a log, <b>F1</b>, <b>:help</b></td><td>this help (in a text, <b>?</b> searches backward); <b>:</b> opens the command line</td></tr>
 <tr><td>the bottom rows in a list or a log</td><td>the key hints (a row above the bar; <b>:set nohints</b> hides it, <b>:set hints</b> brings it back) and the bar, which says which entry or message the cursor is in, of how many; the bar stays on the entry you are in</td></tr>
 <tr><td><b>zm</b> or <b>:set markdown</b></td><td>toggle rendered markdown (bold, italic, headings, code, links, quotes, bullets) and the raw text</td></tr>

@@ -1,5 +1,12 @@
 2026-11-17  David Walther
 
+	* viewer.html: sortSpec (o + d c r p t, capital reverses), sortFromWords (:sort KEY [reverse]), mkView (viewArg's mk, now shared), sortView,
+	  sortList; `o` is the sort prefix in a list with a hook (pendingKey handles the letter), `:sort`, vfTitle names `sort`, hint row `o sort`, F1 help.
+	* tests/test_markdown.js: the letters and their directions, :sort parsing, the arguments sorting asks for, and that P keeps the order.
+	* winless.1: o and :sort.
+
+2026-11-17  David Walther
+
 	* viewer.html: fixed `case "?"` and `case ":"` that sat after a // comment on one line, so `:` (command line) and `?` did nothing
 	  in normal mode; `?` is now the help in a list or a log and the backward search elsewhere.
 	* viewer.html: olInfo has rank and count (the entry each line belongs to); stInfo (cached per text) does the same for the messages
