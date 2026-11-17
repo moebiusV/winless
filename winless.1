@@ -24,6 +24,7 @@ Load a file, or standard input, and open the window if none is connected. Option
 .BR \-\-font " FAMILY,"
 .BR \-\-size " PX,"
 .BR \-N " (line numbers),"
+.BR \-M " or " \-\-markdown " (render markdown: bold, italic, headings, code, links),"
 .BR \-S " (chop long lines),"
 .BR \-\-windowed " (normal window instead of full screen),"
 .BR \-\-no\-window " (load only),"
@@ -47,7 +48,7 @@ Highlight a regular expression wherever it occurs; \fBunhl\fR removes them.
 .BI key " KEY..."
 Send keys as if typed (j k space b g G / n and the names enter, up, down, pgup, pgdn, home, end, esc).
 .TP
-.BR config " [\-\-theme T] [\-\-font F] [\-\-size N] [\-\-numbers|\-\-no\-numbers] [\-\-wrap|\-\-chop]"
+.BR config " [\-\-theme T] [\-\-font F] [\-\-size N] [\-\-numbers|\-\-no\-numbers] [\-\-wrap|\-\-chop] [\-\-markdown|\-\-no\-markdown]"
 Change the display.
 .TP
 .BI flash " TEXT"
@@ -248,7 +249,7 @@ for the options, the requirements and what to do when something does not work.
 .SH KEYS
 j, Down, Enter, e: line down; k, Up, y: line up; Space, f, PageDown: page down; b, PageUp: page up; d, u: half page;
 g, Home / G, End: top / bottom; /pattern, ?pattern: search forward/backward; n, N: next/previous match, wrapping around at the ends of the file (like vim's wrapscan); h, Left / l, Right: scroll sideways when long lines are chopped (w toggles), 0: back to column 0; Ctrl-d, Ctrl-u: half page; Ctrl-f, Ctrl-b: page; Ctrl-e, Ctrl-y: line; gg: top;
-:NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; t: theme; Ctrl-plus/minus: font size; F1 or :help: help; q: quit.
+:NUMBER, :N%: go to; # or \-N: line numbers; w or \-S: wrap/chop; zm: rendered markdown or raw text; t: theme; Ctrl-plus/minus: font size; F1 or :help: help; q: quit.
 .SH CURSOR, VISUAL MODE AND EDITING
 The window has a cursor, always shown as a steady block. The keys are vim's: h, j, k, l and the arrow keys move it (j and k by screen
 row, so a wrapped paragraph is walked row by row), w, b, e, 0, $, ( ), { }, G and gg move it further, and a mouse click puts it

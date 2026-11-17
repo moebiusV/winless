@@ -1,6 +1,24 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Rendered markdown: `winless open -M` (or `config --markdown`, or `zm` / `:set markdown` in the window) draws headings, quotes, bullets, **bold**, *italic*,
+  `code`, ~~strike~~ and [links](url) as styled text.  The marks stay in the text, so search, selection and notes work on the real text, but they are hidden,
+  and the cursor steps over them; `zm` shows the raw text again.  Tables drawn with box characters never wrap: h/l/arrows scroll them sideways when the cursor is
+  on one (as vim's sidescroll does), an edge bar and `table <> (zh zl)` in the status bar show where a table runs on, and markdown pipe tables can be laid out as
+  real table rows.  `status --json` reports the markdown and table state under geom.
+  Links: a click on a markdown link or a bare http(s):// / mailto: address opens it (gx opens the one under the cursor, or the next on the line, as in vim); bare
+  addresses are drawn as links.  Only http, https and mailto are ever opened.
+  Lists: `winless open --outline` folds org-style headings ("* ", "** ") with their body lines; every entry starts closed.  Tab, l and h open and close an entry,
+  za zo zc zR zM work as in vim, j and k step from entry to entry.  `--hook CMD` makes Enter run CMD with the entry's #id in place of {} and show its output in the
+  same window, read-only; the list's place, open entries and scroll position are saved, Alt-Left comes back to it exactly as you left it and Alt-Right goes
+  forward again (q still quits).  The id may contain only letters, digits and _ . : - so nothing can be injected into the command.
+  Streams: `winless open --stream` shows a chat log, one line per message ("[10:00] web#468 <you> text").  In a list or a stream, Enter / P / U / o / L / S and
+  `:narrow TEXT` ask the hook for another view of the same data -- a thread whole, a platform, a speaker, a text -- in the same window; filters add up (P after U keeps
+  the speaker), Enter reads the thread whole, Alt-Left widens again.  The hook may also be given free text, which reaches the command only as $WINLESS_TEXT.
+  In the thread list `/` narrows the list to matching threads (like `f` / `:limit`) and opens nothing; inside a thread or a log `/` is the ordinary text search, and a search hit
+  inside a closed entry (`?`, `n`) opens that entry so the hit can be seen.  gg, G and NG now really jump to a line outside the view (the cursor used to be pulled back into it, so on
+  a long file gg did nothing).  Closing entries keeps the view on the entry you were in.
+  Limit: `f` or `:limit PATTERN` (alias :narrow) narrows a list or stream with a mutt-style pattern (the hook gets it as $WINLESS_TEXT); see the help (F1).
   Over ssh: `sshw HOST` (or `winless ssh HOST`) is ssh with winless working on the host.  One ssh connection (ControlMaster) carries a private unix
   socket back to a relay on your desktop and, on demand, the port forward for each window; on the host `winless open` starts its server beside the file and
   rings the bell ($WINLESS_BELL) instead of launching a browser.  A host without winless gets a static build uploaded once (make builds remote/OS-MACHINE/winless;

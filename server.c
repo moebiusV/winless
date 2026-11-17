@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -41,7 +42,8 @@ typedef struct { char *pattern; char *color; } hl_t;
 
 static struct {
     char *name; char *text; size_t textlen; long version;
-    char *theme, *font; long size; int numbers, wrap;           /* numbers/wrap: -1 = unset */
+    char *theme, *font; long size; int numbers, wrap, markdown, outline, stream;   /* numbers/wrap/markdown/outline/stream: -1 = unset */
+    char *hook;                                         /* `open --hook CMD`: run when the page asks (Enter on a list entry); {} is the entry's id */
     mark_t *marks; size_t nmarks;
     hl_t *hls; size_t nhls;
     char *search; long top;
@@ -68,7 +70,7 @@ static char g_token[65];            /* this server's secret: a request must carr
 /* ------------------------------------------------------------------------------------------------------- hub */
 static void hub_init(void) {
     memset(&H, 0, sizeof H);
-    H.name = xstrdup(""); H.text = xstrdup(""); H.numbers = H.wrap = -1; H.top = 1; H.mtime = -1;
+    H.name = xstrdup(""); H.text = xstrdup(""); H.numbers = H.wrap = H.markdown = H.outline = H.stream = -1; H.top = 1; H.mtime = -1;
 }
 
 static void set_str(char **dst, const jv *v) {
@@ -84,6 +86,10 @@ static void apply_settings(const jv *o) {
     if (v && v->t == J_NUM) H.size = (long)v->num;
     v = json_get(o, "numbers"); if (v && v->t == J_BOOL) H.numbers = v->b;
     v = json_get(o, "wrap"); if (v && v->t == J_BOOL) H.wrap = v->b;
+    v = json_get(o, "markdown"); if (v && v->t == J_BOOL) H.markdown = v->b;
+    v = json_get(o, "outline"); if (v && v->t == J_BOOL) H.outline = v->b;
+    v = json_get(o, "stream"); if (v && v->t == J_BOOL) H.stream = v->b;
+    set_str(&H.hook, json_get(o, "hook"));
 }
 
 static void clear_marks(void) { for (size_t i = 0; i < H.nmarks; i++) free(H.marks[i].color); free(H.marks); H.marks = NULL; H.nmarks = 0; }
@@ -100,6 +106,10 @@ static void settings_json(sb_t *b) {
     if (H.size) { SEP(); sb_printf(b, "\"size\":%ld", H.size); }
     if (H.numbers >= 0) { SEP(); sb_printf(b, "\"numbers\":%s", H.numbers ? "true" : "false"); }
     if (H.wrap >= 0) { SEP(); sb_printf(b, "\"wrap\":%s", H.wrap ? "true" : "false"); }
+    if (H.markdown >= 0) { SEP(); sb_printf(b, "\"markdown\":%s", H.markdown ? "true" : "false"); }
+    if (H.outline >= 0) { SEP(); sb_printf(b, "\"outline\":%s", H.outline ? "true" : "false"); }
+    if (H.stream >= 0) { SEP(); sb_printf(b, "\"stream\":%s", H.stream ? "true" : "false"); }
+    if (H.hook) { SEP(); sb_puts(b, "\"hook\":"); json_put_string(b, H.hook, strlen(H.hook)); }
 #undef SEP
     sb_putc(b, '}');
 }
@@ -424,7 +434,7 @@ static const char *run_filter(const char *cmd, const char *cwd, const char *in, 
     close(pin[0]); close(pout[1]); close(perr[1]);
     int fi = pin[1], fo = pout[0], fe = perr[0];
     fcntl(fi, F_SETFL, fcntl(fi, F_GETFL) | O_NONBLOCK); fcntl(fo, F_SETFL, fcntl(fo, F_GETFL) | O_NONBLOCK); fcntl(fe, F_SETFL, fcntl(fe, F_GETFL) | O_NONBLOCK);
-    size_t done = 0; const size_t maxout = 64UL * 1024 * 1024;
+    size_t done = 0; const size_t maxout = 256UL * 1024 * 1024;       /* a whole message stream is ~45 MB and grows */
     double deadline = now_monotonic() + timeout; const char *err = NULL;
     if (inlen == 0) { close(fi); fi = -1; }
     while (fo >= 0 || fe >= 0) {
@@ -901,6 +911,36 @@ static void review_command(const jv *v, sb_t *r) {
     put_result(r, NULL);
 }
 
+/* The page asks to run the window's hook: Enter on an entry of a list opens it in this same window.  The command line was fixed by whoever ran
+ * `winless open --hook CMD`; the page supplies only the argument that replaces {}, and that is limited to letters, digits and _ . : - so nothing
+ * can be injected.  The command's output comes back as {"ok":true,"text":...}; the page shows it and `q` returns to the list. */
+static void hook_command(const jv *v, sb_t *r) {
+    const char *arg = json_gets(v, "arg", NULL);
+    if (!H.hook || !*H.hook) { put_result(r, "this window has no command (open it with --hook CMD)"); return; }
+    if (!arg || !*arg || strlen(arg) > 64) { put_result(r, "bad argument"); return; }
+    for (const char *p = arg; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.' || *p == ':' || *p == '-')) { put_result(r, "bad argument"); return; }
+    sb_t cmd; sb_init(&cmd);
+    for (const char *p = H.hook; *p; p++) { if (p[0] == '{' && p[1] == '}') { sb_puts(&cmd, arg); p++; } else sb_putc(&cmd, *p); }
+    sb_t out, er; sb_init(&out); sb_init(&er); int status = 0;
+    const char *txt = json_gets(v, "text", NULL);              /* free text: only in $WINLESS_TEXT, never in the command line */
+    if (txt && strlen(txt) < 1024) setenv("WINLESS_TEXT", txt, 1); else unsetenv("WINLESS_TEXT");
+    const char *err = run_filter(cmd.s, NULL, "", 0, 60, &out, &er, &status);
+    unsetenv("WINLESS_TEXT");
+    sb_free(&cmd);
+    if (!err && status != 0) {
+        while (er.len && (er.s[er.len - 1] == '\n' || er.s[er.len - 1] == '\r')) er.s[--er.len] = 0;
+        sb_t msg; sb_init(&msg); sb_printf(&msg, "the command failed (exit %d)%s%.300s", status, er.len ? ": " : "", er.s);
+        put_result(r, msg.s); sb_free(&msg);
+    } else if (err) put_result(r, err);
+    else {
+        sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, out.s, out.len);
+        sb_puts(r, "{\"ok\":true,\"text\":"); json_put_string(r, clean.s, clean.len); sb_putc(r, '}');
+        sb_free(&clean);
+    }
+    sb_free(&out); sb_free(&er);
+}
+
 static void edit_command(const char *cmd, const jv *v, sb_t *r) {
     if (!strcmp(cmd, "edit")) {
         size_t tl = 0; const char *tx = json_gets(v, "text", &tl);
@@ -913,6 +953,8 @@ static void edit_command(const char *cmd, const jv *v, sb_t *r) {
         const char *b = json_gets(v, "value", NULL);
         if (b && (!strcmp(b, "claude") || !strcmp(b, "api"))) { snprintf(g_backend, sizeof g_backend, "%s", b); put_result(r, NULL); }
         else put_result(r, "the backend must be claude or api");
+    } else if (!strcmp(cmd, "hook")) {
+        hook_command(v, r);
     } else if (!strcmp(cmd, "filter")) {
         filter_command(v, r);
     } else if (!strcmp(cmd, "annotate")) {
@@ -985,7 +1027,7 @@ static void h_cmd(conn *c, const char *body, size_t blen) {
         sb_putc(&res, '}'); json_free(v); respond_json(c, &res); return;
     }
     if (!strcmp(cmd, "edit") || !strcmp(cmd, "undo") || !strcmp(cmd, "redo") || !strcmp(cmd, "write") || !strcmp(cmd, "history") || !strcmp(cmd, "revert")
-        || !strcmp(cmd, "revise") || !strcmp(cmd, "review") || !strcmp(cmd, "backend")
+        || !strcmp(cmd, "revise") || !strcmp(cmd, "review") || !strcmp(cmd, "backend") || !strcmp(cmd, "hook")
         || !strcmp(cmd, "filter") || !strcmp(cmd, "annotate") || !strcmp(cmd, "annotations") || !strcmp(cmd, "unannotate")) {
         sb_t res; sb_init(&res); edit_command(cmd, v, &res); json_free(v); respond_json(c, &res); return;
     }

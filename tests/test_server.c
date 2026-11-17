@@ -345,6 +345,36 @@ static void t_the_secret_file_is_private(void) {
     CHECK_INT(strlen(test_token()), 64);
 }
 
+static void t_hook_returns_the_command_output_and_refuses_bad_arguments(void) {
+    /* no hook yet: the page's request is refused */
+    jv *r = post_json("/cmd", "{\"cmd\":\"hook\",\"arg\":\"7\"}");
+    CHECK_INT(json_getbool(r, "ok", 1), 0); CHECK_CONTAINS(json_gets(r, "error", NULL), "no command");
+    json_free(r);
+    /* a window opened with --hook CMD: {} becomes the id, the output comes back */
+    r = post_json("/cmd", "{\"cmd\":\"load\",\"name\":\"list\",\"text\":\"* a #7\\n\",\"settings\":{\"outline\":true,\"hook\":\"printf 'thread-%s\\\\nok\\\\n' {}\"}}");
+    json_free(r);
+    jv *c = get_json("/content");
+    CHECK_INT(json_getbool(json_get(c, "settings"), "outline", 0), 1);
+    CHECK(json_gets(json_get(c, "settings"), "hook", NULL) != NULL);
+    json_free(c);
+    r = post_json("/cmd", "{\"cmd\":\"hook\",\"arg\":\"42\"}");
+    CHECK_INT(json_getbool(r, "ok", 0), 1); CHECK_STR(json_gets(r, "text", NULL), "thread-42\nok\n");
+    json_free(r);
+    /* the argument is limited to letters, digits and _ . : - ; nothing else reaches the shell */
+    const char *bad[] = { "{\"cmd\":\"hook\",\"arg\":\"1;id\"}", "{\"cmd\":\"hook\",\"arg\":\"$(id)\"}", "{\"cmd\":\"hook\",\"arg\":\"a b\"}",
+                          "{\"cmd\":\"hook\",\"arg\":\"\"}", "{\"cmd\":\"hook\"}" };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        r = post_json("/cmd", bad[i]);
+        CHECK_INT(json_getbool(r, "ok", 1), 0); CHECK_CONTAINS(json_gets(r, "error", NULL), "bad argument");
+        json_free(r);
+    }
+    /* a failing command is reported, not shown as text */
+    r = post_json("/cmd", "{\"cmd\":\"load\",\"name\":\"list\",\"text\":\"x\\n\",\"settings\":{\"hook\":\"echo oops >&2; exit 3\"}}"); json_free(r);
+    r = post_json("/cmd", "{\"cmd\":\"hook\",\"arg\":\"1\"}");
+    CHECK_INT(json_getbool(r, "ok", 1), 0); CHECK_CONTAINS(json_gets(r, "error", NULL), "exit 3");
+    json_free(r);
+}
+
 int main(void) {
     testlib_init();
     static const testcase tests[] = {
@@ -369,6 +399,7 @@ int main(void) {
         { "disconnected_page_is_dropped_at_once", t_disconnected_page_is_dropped_at_once, 1 },
         { "garbage_and_slow_clients_do_not_hurt_the_server", t_garbage_and_slow_clients_do_not_hurt_the_server, 1 },
         { "many_connections_at_once", t_many_connections_at_once, 1 },
+        { "hook_returns_the_command_output_and_refuses_bad_arguments", t_hook_returns_the_command_output_and_refuses_bad_arguments, 1 },
         { "stop_command_ends_the_server", t_stop_command_ends_the_server, 1 },
     };
     return run_tests(tests, sizeof tests / sizeof *tests) ? 1 : 0;

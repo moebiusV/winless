@@ -244,10 +244,10 @@ static int ensure_window(int port, int windowed) {
 static void usage(FILE *f) {
     fputs("usage: winless [--port N] COMMAND [ARGS]\n"
           "  open [FILE|-] [--new|--here] [--force] [--name N] [--line N] [--search P] [--theme dark|light] [--font F] [--size PX]\n"
-          "       [-N] [-S] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
+          "       [-N] [-S] [-M] [--outline|--stream] [--hook CMD] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
           "  goto LINE|N%|top|bottom      scroll [-p] N      search [-b] PATTERN   next  prev  clear\n"
           "  mark A[-B] [COLOR]  unmark   hl PATTERN [COLOR]  unhl   key KEY...   flash TEXT\n"
-          "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop]\n"
+          "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop] [--markdown|--no-markdown]\n"
           "  status [--json] [--text]     wait [--timeout S]     window [--windowed]   close\n"
           "  history | revert [N]    (every write keeps the old file; revert puts one back)\n"
           "  annotate [--kind K] R1 C1 R2 C2 [NOTE] | --file    annotations [--all]    unannotate [--restore] ID\n"
@@ -349,9 +349,9 @@ static int resolve_port(void) {
 }
 
 static int cmd_open(int port, int explicit, int argc, char **argv) {
-    const char *file = NULL, *name = NULL, *search = NULL, *theme = NULL, *font = NULL;
+    const char *file = NULL, *name = NULL, *search = NULL, *theme = NULL, *font = NULL, *hook = NULL;
     long line = 0, size = 0;
-    int numbers = 0, chop = 0, wait = 0, nowin = 0, windowed = 0, force = 0, newwin = 0, here = 0;
+    int numbers = 0, markdown = 0, outline = 0, stream = 0, chop = 0, wait = 0, nowin = 0, windowed = 0, force = 0, newwin = 0, here = 0;
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--name") && i + 1 < argc) name = argv[++i];
@@ -362,6 +362,10 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
         else if (!strcmp(a, "--size") && i + 1 < argc) size = atol(argv[++i]);
         else if (!strcmp(a, "-N") || !strcmp(a, "--numbers")) numbers = 1;
         else if (!strcmp(a, "-S") || !strcmp(a, "--chop")) chop = 1;
+        else if (!strcmp(a, "-M") || !strcmp(a, "--markdown")) markdown = 1;
+        else if (!strcmp(a, "--outline")) outline = 1;
+        else if (!strcmp(a, "--stream")) stream = 1;
+        else if (!strcmp(a, "--hook") && i + 1 < argc) hook = argv[++i];
         else if (!strcmp(a, "--wait")) wait = 1;
         else if (!strcmp(a, "--force")) force = 1;
         else if (!strcmp(a, "--new")) newwin = 1;
@@ -421,6 +425,10 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
     if (font) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"font\":"); json_put_string(&b, font, strlen(font)); first = 0; }
     if (size > 0) { if (!first) sb_putc(&b, ','); sb_printf(&b, "\"size\":%ld", size); first = 0; }
     if (numbers) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"numbers\":true"); first = 0; }
+    if (markdown) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"markdown\":true"); first = 0; }
+    if (outline) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"outline\":true"); first = 0; }
+    if (stream) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"stream\":true"); first = 0; }
+    if (hook) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"hook\":"); json_put_string(&b, hook, strlen(hook)); first = 0; }
     if (chop) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"wrap\":false"); }
     sb_puts(&b, "}}");
     char *lresp = NULL;
@@ -815,13 +823,14 @@ int client_main(int port, int explicit_port, int argc, char **argv) {
         return send_cmd(port, &b, NULL);
     }
     if (!strcmp(cmd, "config")) {
-        const char *theme = NULL, *font = NULL; long size = 0; int numbers = -1, wrap = -1;
+        const char *theme = NULL, *font = NULL; long size = 0; int numbers = -1, wrap = -1, markdown = -1;
         for (int i = 0; i < ac; i++) {
             if (!strcmp(av[i], "--theme") && i + 1 < ac) theme = av[++i];
             else if (!strcmp(av[i], "--font") && i + 1 < ac) font = av[++i];
             else if (!strcmp(av[i], "--size") && i + 1 < ac) size = atol(av[++i]);
             else if (!strcmp(av[i], "--numbers")) numbers = 1; else if (!strcmp(av[i], "--no-numbers")) numbers = 0;
             else if (!strcmp(av[i], "--wrap")) wrap = 1; else if (!strcmp(av[i], "--chop")) wrap = 0;
+            else if (!strcmp(av[i], "--markdown")) markdown = 1; else if (!strcmp(av[i], "--no-markdown")) markdown = 0;
             else { fprintf(stderr, "winless config: unknown argument %s\n", av[i]); return 2; }
         }
         sb_init(&b); sb_puts(&b, "{\"cmd\":\"config\"");
@@ -830,6 +839,7 @@ int client_main(int port, int explicit_port, int argc, char **argv) {
         if (size > 0) { jkey(&b, "size"); sb_printf(&b, "%ld", size); }
         if (numbers >= 0) { jkey(&b, "numbers"); sb_puts(&b, numbers ? "true" : "false"); }
         if (wrap >= 0) { jkey(&b, "wrap"); sb_puts(&b, wrap ? "true" : "false"); }
+        if (markdown >= 0) { jkey(&b, "markdown"); sb_puts(&b, markdown ? "true" : "false"); }
         sb_putc(&b, '}');
         return send_cmd(port, &b, NULL);
     }

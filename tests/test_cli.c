@@ -25,13 +25,14 @@ static void expect_ok(run_t r) {
 
 static void t_open_status_goto_key(void) {
     char *f = tmp_write("t.txt", "alpha\nbeta\n", 11);
-    expect_ok(CLI("open", f, "--no-window", "--theme", "light", "-N", "--search", "beta"));
+    expect_ok(CLI("open", f, "--no-window", "--theme", "light", "-N", "-M", "--search", "beta"));
     jv *c = get_json("/content");
     CHECK_STR(json_gets(c, "name", NULL), "t.txt");
     CHECK_STR(json_gets(c, "text", NULL), "alpha\nbeta\n");
     CHECK_STR(json_gets(c, "search", NULL), "beta");
     CHECK_STR(json_gets(json_get(c, "settings"), "theme", NULL), "light");
     CHECK_INT(json_getbool(json_get(c, "settings"), "numbers", 0), 1);
+    CHECK_INT(json_getbool(json_get(c, "settings"), "markdown", 0), 1);
     json_free(c);
 
     sse_t *page = sse_open();
@@ -94,16 +95,16 @@ static void t_mark_hl_search_config_events(void) {
     expect_ok(CLI("mark", "7"));
     expect_ok(CLI("hl", "fox", "blue"));
     expect_ok(CLI("search", "-b", "needle"));
-    expect_ok(CLI("config", "--size", "22", "--no-numbers", "--chop"));
+    expect_ok(CLI("config", "--size", "22", "--no-numbers", "--chop", "--markdown"));
     CHECK_INT(sse_wait(page, 5, 5), 5);
     CHECK_STR(sse_event(page, 0), "{\"cmd\":\"mark\",\"a\":10,\"b\":20,\"color\":\"green\"}");
     CHECK_STR(sse_event(page, 1), "{\"cmd\":\"mark\",\"a\":7,\"b\":7,\"color\":null}");
     CHECK_STR(sse_event(page, 2), "{\"cmd\":\"hl\",\"pattern\":\"fox\",\"color\":\"blue\"}");
     CHECK_STR(sse_event(page, 3), "{\"cmd\":\"search\",\"pattern\":\"needle\",\"backward\":true}");
-    CHECK_STR(sse_event(page, 4), "{\"cmd\":\"config\",\"size\":22,\"numbers\":false,\"wrap\":false}");
+    CHECK_STR(sse_event(page, 4), "{\"cmd\":\"config\",\"size\":22,\"numbers\":false,\"wrap\":false,\"markdown\":true}");
     jv *c = get_json("/content");
     const jv *s = json_get(c, "settings");
-    CHECK_INT(json_getnum(s, "size", 0), 22); CHECK_INT(json_getbool(s, "numbers", 1), 0); CHECK_INT(json_getbool(s, "wrap", 1), 0);
+    CHECK_INT(json_getnum(s, "size", 0), 22); CHECK_INT(json_getbool(s, "numbers", 1), 0); CHECK_INT(json_getbool(s, "wrap", 1), 0); CHECK_INT(json_getbool(s, "markdown", 0), 1);
     json_free(c);
     sse_close(page);
 }

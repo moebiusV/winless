@@ -1,3 +1,33 @@
+2026-11-07  David Walther
+
+	* viewer.html: `/` in an outline list opens the :limit prompt (narrows, opens nothing); in threads and logs it stays the ordinary search.  geom() reports the prompt state.
+
+2026-11-07  David Walther
+
+	* viewer.html: setCursor renders with S.keeping set, then keepCursorVisible scrolls, so a cursor sent outside the view (gg, G, NG) is no longer pulled back by pullCursor.
+	* viewer.html: olReveal opens the closed entries above a search hit (stepMatch); olToggle/olAll keep S.top on the entry when closing.
+	* server.c: filter/hook output cap 64 MB -> 256 MB (a whole message stream is ~45 MB).
+	* tests/test_markdown.js: olReveal (67 tests).
+
+2026-11-05  David Walther
+
+	* viewer.html: rendered markdown (mdParse, mdLine, mdSnap, toggleMarkdown; zm, :set markdown): CommonMark-style emphasis (delimiter runs, flanking rules),
+	code spans, links, escapes, strikethrough, headings, quotes, bullets, fenced blocks.  Marks are hidden, not removed; setCursor steps over them.
+	* viewer.html: box-drawing table rows (.tbl) never wrap; followCursorX scrolls sideways with the cursor; .more-l/.more-r edge bars; markdown pipe rows as
+	table-row cells (.trow); geom() reports md and tables.
+	* client.c, server.c, winless.1: new setting `markdown` (open -M/--markdown, config --markdown|--no-markdown).
+	* viewer.html: links (bareUrls, linkAt, openLink, safeUrl): click or gx opens a markdown link or a bare http(s)/mailto address; other schemes are refused.
+	* viewer.html: outline view (olInfo, olToggle, olAll, olKey; --outline): org headings fold their body lines (display:none), Tab/l/h/Enter and z commands; the
+	cursor never rests on a hidden line.  snapshot/restore/goBack/goForward: opening an entry saves the list's state, Alt-Left / Alt-Right move through the saved
+	views, and while a thread is open from the list the mutating commands are refused (read-only).  q quits as before.
+	* server.c, client.c: settings `outline` and `hook` (open --outline, --hook CMD) and the `hook` command: runs the hook with {} replaced by a validated id and
+	returns the output.  tests/test_server.c covers it, including injection attempts and a failing command.
+	* viewer.html: stream view (--stream; stHeader, viewArg, vfArg, hookOpen, narrow): message lines coloured by part, Enter/P/U/o/L/S and :narrow open narrowed views through
+	the hook with compounding filters (S.vf); marker line -*- outline -*- / -*- stream -*- tells pushView what the hook returned.
+	* server.c, client.c: setting `stream` (open --stream); the hook command passes free text only through $WINLESS_TEXT.
+	* viewer.html: `f` and `:limit PATTERN` (:narrow is an alias) open the list or stream limited by a pattern; the `limit` filter keeps its text across further narrowing.
+	* tests/test_markdown.js (65 tests, run by `make check` when node is present); tests/test_cli.c covers the new setting.
+
 2026-11-05  David Walther
 
 	* remote.c, sshw.1: new.  `winless ssh` / `sshw`: one ssh ControlMaster connection per session, a unix socket forwarded back to a relay on the

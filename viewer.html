@@ -13,7 +13,36 @@
   #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
           font:var(--size)/1.38 var(--font); box-sizing:border-box; }
   .line { white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; min-height:1.38em; }
-  .chop .line { white-space:pre; overflow:hidden; text-overflow:clip; }
+  .chop .line, .line.tbl { white-space:pre; overflow:hidden; text-overflow:clip; }   /* .tbl: box-drawing table rows never wrap; zh/zl scroll them */
+  /* markdown table rows: consecutive display:table-row lines form one table, columns aligned by the browser; zh/zl shift the cells */
+  .line.trow { display:table-row; }
+  .line.trow .cell { display:table-cell; white-space:nowrap; padding:0 1.2ch 0 0; position:relative; left:calc(var(--hx, 0px) * -1); border-bottom:1px solid var(--bar); }
+  .line.trow .cell::first-letter { color:var(--dim); }
+  .line.trow.tsep { color:var(--dim); }
+  /* a table row that runs on past the left / right edge gets a bar on that edge (box-shadow stays put while the text scrolls) */
+  .line.tbl.more-l { box-shadow:inset 5px 0 0 var(--vcur); }
+  .line.tbl.more-r { box-shadow:inset -5px 0 0 var(--vcur); }
+  .line.tbl.more-l.more-r { box-shadow:inset 5px 0 0 var(--vcur), inset -5px 0 0 var(--vcur); }
+  /* rendered markdown (zm toggles it off to show the raw text): the marks are hidden, the text between them styled */
+  .md-hide { display:none; }
+  .st-dim { color:var(--dim); } .st-you { color:#e6c36a; font-weight:700; } .st-bot { color:#7ec07e; font-weight:700; }
+  :root.light .st-you { color:#8a5a00; } :root.light .st-bot { color:#2e7d32; }
+  .line.st-day { color:var(--dim); border-top:1px solid var(--bar); margin-top:.3em; }
+  /* outline entries (a list opened with --outline): one row each, a triangle for closed / open, the current one highlighted */
+  .line.ol-h { font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .line.ol-h::before { content:"\25b8\00a0"; color:var(--dim); } .line.ol-h.ol-open::before { content:"\25be\00a0"; }
+  .line.ol-h2 { padding-left:2ch; } .line.ol-h3 { padding-left:4ch; } .line.ol-h4 { padding-left:6ch; }
+  .line.ol-h.ol-cur { background:var(--sel); }
+  .line.ol-h .vcur { background:transparent; box-shadow:none; color:inherit; }
+  .md-b { font-weight:700; } .md-i { font-style:italic; } .md-s { text-decoration:line-through; }
+  .md-code { background:var(--bar); border-radius:3px; padding:0 .3ch; }
+  .md-link, .url { color:#6cb6ff; text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+  :root.light .md-link, :root.light .url { color:#0b5cad; }
+  .md-bul { font-size:0; } .md-bul::before { content:"\2022"; font-size:var(--size); color:var(--dim); }
+  .line.md-h { font-weight:700; color:#e6c36a; } :root.light .line.md-h { color:#8a5a00; }
+  .line.md-h1 { font-size:1.5em; } .line.md-h2 { font-size:1.32em; } .line.md-h3 { font-size:1.16em; }
+  .line.md-quote { border-left:3px solid var(--dim); padding-left:1.2ch; color:var(--dim); }
+  .line.md-codeblock { background:rgba(127,127,127,.13); } .line.md-fence, .line.md-hr { color:var(--dim); }
   .ln { position:sticky; left:0; z-index:1; background:var(--bg); display:inline-block; min-width:var(--lnw,4ch); margin-right:1.2ch; color:var(--dim); text-align:right;
         unicode-bidi:isolate; user-select:none; }
   .mk { background:var(--mark); }
@@ -75,7 +104,7 @@
 const $ = id => document.getElementById(id);
 const view = $("view"), measure = $("measure");
 const S = { lines: [], name: "", top: 0, bottom: 0, numbers: false, wrap: true, hx: 0, off: 0, vis: null, reg: null, last: null, pend: null, op: null, panel: null, cur: { r: 0, c: 0 }, goalX: null, keeping: false, count: 0, opN: 1, nl: true, redo: 0, anns: [], rv: null, rvOrig: null, rvView: null, rvCur: null, rvElapsed: 0, dirty: false, undo: 0, path: null,
-            search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false };
+            search: null, searchBack: false, matchLines: [], curLine: -1, marks: [], hls: [], prompt: null, atEnd: false, markdown: false, outline: false, stream: false, vf: {}, vtext: "", hasHook: false, back: [], fwd: [] };
 let sentTimer = null, closedSent = false;
 
 /* ---------- helpers ---------- */
@@ -88,9 +117,263 @@ function makeRe(p) { try { return new RegExp(p, smartcase(p)); } catch (e) { ret
 function colorVar(c) { return { yellow:"#7a6a00", red:"#7a2a2a", green:"#245a2a", blue:"#274a73", purple:"#55307a", orange:"#8a4a10" }[c] || c || ""; }
 
 /* ---------- line rendering ---------- */
+/* Markdown table rows ("| a | b |") are drawn as real table rows.  The text itself is untouched: every character is still
+   there to search, select and annotate, and each cell starts with its "|" (shown dim). */
+function tableCells(t) {
+  if (!/^\s*\|.*\|\s*$/.test(t)) return null;
+  const idx = []; for (let i = 0; i < t.length; i++) if (t[i] === "|" && t[i - 1] !== "\\") idx.push(i);
+  if (idx.length < 2) return null;
+  const out = []; if (idx[0] > 0) out.push([0, idx[0]]);
+  for (let k = 0; k < idx.length; k++) out.push([idx[k], k + 1 < idx.length ? idx[k + 1] : t.length]);
+  return out;
+}
+function isSepRow(t) { return /^\s*\|[\s:|-]*-[\s:|-]*\|?\s*$/.test(t); }
+
+/* ---------- rendered markdown ----------
+   With S.markdown on, each line is parsed for headings, quotes, bullets, **bold**, *italic*, `code`, ~~strike~~ and [links](url).  The marks stay in
+   the text (so search, selection and notes work on the real text) but are drawn hidden, and the text between them is styled.  The cursor steps over
+   hidden marks (mdSnap).  zm / :set markdown shows the raw text instead. */
+const MD = { fence: null, cache: new Map() };
+const MD_BITS = [[1, "md-b"], [2, "md-i"], [4, "md-code"], [8, "md-s"], [16, "md-link"]];
+function mdFence() {                 // per line: 0 plain, 1 a ``` fence line, 2 inside a fenced block
+  if (MD.fence && MD.fence.length === S.lines.length) return MD.fence;
+  const f = new Uint8Array(S.lines.length); let inside = false;
+  for (let i = 0; i < f.length; i++) { if (/^\s*(```|~~~)/.test(S.lines[i])) { f[i] = 1; inside = !inside; } else if (inside) f[i] = 2; }
+  return (MD.fence = f);
+}
+function mdLine(i) {
+  const t = S.lines[i] || "";
+  if (S.outline) { const o = /^(\*+)\s+/.exec(t); if (o) return { lineCls: "", segs: [[0, o[0].length, "md-hide"], [o[0].length, t.length, ""]], hides: [[0, o[0].length]] }; }   // outline heading: the stars are not shown
+  if (!S.markdown) return null;
+  if (!t || /^\s*[┌├└│]/.test(t)) return null;      // empty, or a drawn table row
+  const f = mdFence()[i], hit = MD.cache.get(i);
+  if (hit && hit.t === t && hit.f === f) return hit.r;
+  const r = mdParse(t, f); MD.cache.set(i, { t, f, r }); return r;
+}
+function mdParse(t, f) {
+  if (f === 1) return { lineCls: "md-fence", segs: [], hides: [] };
+  if (f === 2) return { lineCls: "md-codeblock", segs: [], hides: [] };
+  const n = t.length, H = new Uint8Array(n), P = new Uint8Array(n), K = new Uint8Array(n), LI = new Uint16Array(n), urls = [];
+  const hide = (a, b) => { for (let k = a; k < b; k++) H[k] = 1; };
+  let lineCls = "", bul = -1, m;
+  if ((m = /^(\s{0,3})(#{1,6})(\s+|$)/.exec(t))) { hide(m[1].length, m[0].length); lineCls = "md-h md-h" + m[2].length; }
+  else if ((m = /^(\s*)((?:>\s?)+)/.exec(t))) { hide(m[1].length, m[0].length); lineCls = "md-quote"; }
+  else if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(t)) lineCls = "md-hr";
+  else if ((m = /^(\s*)([-*+])(\s+)/.exec(t))) { bul = m[1].length; P[bul] = 1; }
+  let re, a, b;
+  re = /(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;                              // code spans: protected from everything else
+  while ((m = re.exec(t))) { a = m.index; b = a + m[0].length; const k = m[1].length; hide(a, a + k); hide(b - k, b); for (let x = a + k; x < b - k; x++) K[x] |= 4; for (let x = a; x < b; x++) P[x] = 1; }
+  re = /\\([\\`*_{}\[\]()#+\-.!>~|])/g;                               // \* is a literal *
+  while ((m = re.exec(t))) { a = m.index; if (P[a] || P[a + 1]) continue; H[a] = 1; P[a + 1] = 1; }
+  re = /(!?)\[([^\]\n]*)\]\(([^)\s]*)(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;   // [text](url), ![alt](src)
+  while ((m = re.exec(t))) {
+    a = m.index; b = a + m[0].length; if (P[a]) continue;
+    const ts = a + m[1].length + 1, te = ts + m[2].length;
+    hide(a, ts); hide(te, b); urls.push(m[3]); for (let x = ts; x < te; x++) { K[x] |= 16; LI[x] = urls.length; } for (let x = te; x < b; x++) P[x] = 1; P[ts - 1] = 1;
+  }
+  const ws = ch => ch === undefined || /\s/.test(ch), pu = ch => ch !== undefined && /[\p{P}\p{S}]/u.test(ch);
+  const dl = [];                                                        // emphasis: CommonMark-style delimiter runs
+  for (let k = 0; k < n;) {
+    const ch = t[k];
+    if ((ch === "*" || ch === "_") && !P[k]) {
+      let e = k; while (e < n && t[e] === ch && !P[e]) e++;
+      const bf = t[k - 1], af = t[e];
+      const lf = !ws(af) && (!pu(af) || ws(bf) || pu(bf)), rf = !ws(bf) && (!pu(bf) || ws(af) || pu(af));
+      dl.push({ ch, pos: k, len: e - k, open: ch === "*" ? lf : lf && (!rf || pu(bf)), close: ch === "*" ? rf : rf && (!lf || pu(af)) });
+      k = e;
+    } else k++;
+  }
+  const stack = [];
+  for (let ci = 0; ci < dl.length; ci++) {
+    const c = dl[ci];
+    if (c.close) while (c.len > 0) {
+      let oi = -1;
+      for (let s = stack.length - 1; s >= 0; s--) {
+        const o = dl[stack[s]]; if (o.ch !== c.ch || o.len <= 0) continue;
+        if ((o.open && o.close || c.open && c.close) && (o.len + c.len) % 3 === 0 && !(o.len % 3 === 0 && c.len % 3 === 0)) continue;
+        oi = s; break;
+      }
+      if (oi < 0) break;
+      const o = dl[stack[oi]], use = o.len >= 2 && c.len >= 2 ? 2 : 1, oEnd = o.pos + o.len, cStart = c.pos;
+      hide(oEnd - use, oEnd); hide(cStart, cStart + use);
+      for (let x = oEnd; x < cStart; x++) K[x] |= use === 2 ? 1 : 2;
+      o.len -= use; c.pos += use; c.len -= use;
+      stack.length = oi + (o.len > 0 ? 1 : 0);
+    }
+    if (c.open && c.len > 0) stack.push(ci);
+  }
+  re = /~~(?=\S)([\s\S]*?\S)~~/g;
+  while ((m = re.exec(t))) { a = m.index; b = a + m[0].length; if (P[a]) continue; hide(a, a + 2); hide(b - 2, b); for (let x = a + 2; x < b - 2; x++) K[x] |= 8; }
+  const segs = [], hides = [];
+  let s0 = 0, k0 = null;
+  const keyAt = k => k === bul ? 254 : H[k] ? 255 : K[k] + 256 * LI[k];     // low byte: style bits; above: which link
+  for (let k = 0; k <= n; k++) {
+    const key = k < n ? keyAt(k) : null;
+    if (key === k0) continue;
+    if (k0 !== null) {
+      if (k0 === 255 || k0 === 254) hides.push([s0, k]);
+      segs.push([s0, k, k0 === 255 ? "md-hide" : k0 === 254 ? "md-bul" : MD_BITS.filter(([bit]) => k0 & bit).map(x => x[1]).join(" "),
+                 k0 >= 256 ? urls[(k0 >> 8) - 1] : null]);
+    }
+    s0 = k; k0 = key;
+  }
+  if (segs.length === 1 && segs[0][2] === "") segs.length = 0;           // nothing to draw: plain line
+  return { lineCls, segs, hides };
+}
+function mdSnap(r, c, prevC) {       // keep the cursor off hidden marks: step over them in the direction of travel
+  const md = (S.markdown || S.outline) ? mdLine(r) : null; if (!md || !md.hides.length) return c;
+  const cps = lcp(r), t = S.lines[r];
+  const toC = u => Array.from(t.slice(0, u)).length, hidden = u => md.hides.some(([a, b]) => u >= a && u < b);
+  const u = cps.slice(0, c).join("").length; if (!hidden(u)) return c;
+  const h = md.hides.find(([a, b]) => u >= a && u < b), fwd = prevC < 0 || c >= prevC;
+  let v = fwd ? h[1] : h[0] - 1;
+  if (v < 0 || v >= t.length || hidden(v)) v = fwd ? h[0] - 1 : h[1];        // nothing visible that way: take the other side
+  if (v < 0 || v >= t.length || hidden(v)) return c;
+  return Math.min(toC(v), cps.length - 1);
+}
+/* ---------- links: click one (or gx) to open it.  Markdown [text](url) links and bare http(s):// and mailto: addresses; nothing else is ever opened. */
+const URL_RE = /(?:https?:\/\/|mailto:)[^\s<>"'`]+/g;
+function safeUrl(u) { return /^(https?:\/\/|mailto:)/i.test(u || ""); }
+function bareUrls(text) {            // [[start, end, url]] with trailing punctuation left out
+  const out = []; let m; URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(text))) {
+    let u = m[0];
+    for (;;) {
+      if (!/[.,;:!?)\]}>]$/.test(u)) break;
+      if (u.endsWith(")") && (u.match(/\(/g) || []).length >= (u.match(/\)/g) || []).length) break;     // (…_(bar)) keeps its own paren
+      u = u.slice(0, -1);
+    }
+    if (u.length > 8) out.push([m.index, m.index + u.length, u]);
+  }
+  return out;
+}
+function linkAt(r, c, nearest) {     // the link under column c of line r; with `nearest`, else the next one on the line
+  const t = S.lines[r] || "", u = lcp(r).slice(0, c).join("").length, md = mdLine(r), cand = [];
+  if (md) for (const s of md.segs) if (s[3]) cand.push([s[0], s[1], s[3]]);
+  for (const x of bareUrls(t)) if (!cand.some(y => x[0] < y[1] && x[1] > y[0]) && !(md && md.hides.some(h => x[0] < h[1] && x[1] > h[0]))) cand.push(x);
+  cand.sort((a, b) => a[0] - b[0]);
+  const hit = cand.find(x => u >= x[0] && u < x[1]) || (nearest ? cand.find(x => x[0] >= u) : null);
+  return hit ? hit[2] : null;
+}
+function openLink(url) {
+  if (!safeUrl(url)) { flash("not opening " + url.slice(0, 50)); return false; }
+  window.open(url, "_blank", "noopener,noreferrer");
+  flash(url.length > 70 ? url.slice(0, 67) + "..." : url); return true;
+}
+/* ---------- outline: org-style headings ("* ", "** ") fold their body lines.  All start closed; Tab, l, h, Enter and the z commands open and close them.
+   Lines under a closed heading are drawn display:none (they stay in the buffer, so line numbers and search are unchanged). */
+const OL = { info: null, ex: new Set(), ver: 0 };
+function olInfo() {                  // per line: heading level (0 = body), whether a closed heading hides it, and the heading it belongs to
+  if (OL.info && OL.info.n === S.lines.length && OL.info.v === OL.ver) return OL.info;
+  const n = S.lines.length, lvl = new Uint8Array(n), hid = new Uint8Array(n), owner = new Int32Array(n).fill(-1), stack = [];
+  for (let i = 0; i < n; i++) {
+    const m = /^(\*+)\s/.exec(S.lines[i]);
+    if (m) {
+      const L = Math.min(m[1].length, 255);
+      while (stack.length && stack[stack.length - 1].level >= L) stack.pop();
+      hid[i] = stack.some(x => !x.open) ? 1 : 0; lvl[i] = L; owner[i] = i;
+      stack.push({ level: L, open: OL.ex.has(i) });
+    } else { hid[i] = stack.some(x => !x.open) ? 1 : 0; owner[i] = stack.length ? olOwnerLine(owner, i) : -1; }
+  }
+  return (OL.info = { n, v: OL.ver, lvl, hid, owner });
+}
+function olOwnerLine(owner, i) { for (let k = i - 1; k >= 0; k--) if (owner[k] >= 0 && owner[k] === k) return k; return -1; }      // nearest heading above
+function olReveal(r) {              // open every closed entry that hides line r (a search hit lands there); true if any was opened
+  const o = olInfo(); if (!o.hid[r]) return false;
+  let lvl = 256, opened = false;
+  for (let q = r; q >= 0 && lvl > 1; q--) {
+    if (o.lvl[q] && o.lvl[q] < lvl) { lvl = o.lvl[q]; if (!OL.ex.has(q)) { OL.ex.add(q); opened = true; } }
+  }
+  if (opened) { OL.ver++; OL.info = null; }
+  return opened;
+}
+function olSet(h, open) { if (open) OL.ex.add(h); else OL.ex.delete(h); OL.ver++; OL.info = null; }
+function olToggle(r, want) {         // open / close the entry that line r belongs to
+  const h = olInfo().owner[r]; if (h < 0) return false;
+  const open = want === undefined ? !OL.ex.has(h) : want;
+  olSet(h, open);
+  if (!open && S.top > h) { S.top = h; S.off = 0; }        // closing from below the entry (e.g. after a search hit): keep the view on it
+  setCursor(open ? S.cur.r : h, open ? S.cur.c : 0); return true;
+}
+function olAll(open) {
+  const o = olInfo(); OL.ex.clear(); if (open) for (let i = 0; i < o.n; i++) if (o.lvl[i]) OL.ex.add(i);
+  OL.ver++; OL.info = null;
+  let r = S.cur.r; const o2 = olInfo(); while (r > 0 && o2.hid[r]) r--;
+  if (S.top > r) { S.top = r; S.off = 0; }                 // stay on the entry you were in
+  setCursor(r, r === S.cur.r ? S.cur.c : 0);
+}
+function olZ(k) { if (k === "a") olToggle(S.cur.r); else if (k === "o") olToggle(S.cur.r, true); else if (k === "c") olToggle(S.cur.r, false); else if (k === "R") olAll(true); else if (k === "M") olAll(false); }
+function olKey(k) {                  // true when the key was an outline key
+  const o = olInfo(), r = S.cur.r, h = o.owner[r], onHead = o.lvl[r] > 0;
+  if (h < 0) return false;
+  if (k === "Tab") { olToggle(r); return true; }
+  if (k === "Enter") { if (S.hasHook) openEntry(h); else olToggle(r); return true; }
+  if (onHead && (k === "l" || k === "ArrowRight")) { if (!OL.ex.has(h)) olToggle(r, true); return true; }
+  if (onHead && (k === "h" || k === "ArrowLeft")) {
+    if (OL.ex.has(h)) olToggle(r, false);
+    else for (let q = r - 1; q >= 0; q--) if (o.lvl[q] && o.lvl[q] < o.lvl[r]) { setCursor(q, 0); break; }      // closed: go up to the parent entry
+    return true;
+  }
+  return false;
+}
+/* ---------- a stream (--stream): "[10:00] claude#468 <you> text", continuation lines indented; keys narrow it, o opens the whole thread ---------- */
+const ST_HEAD = /^\[(\d\d:\d\d|--:--)\] ([A-Za-z_]+)#(\d+) <([^>\s]+)>/d;
+function stHeader(r) {               // the message line r belongs to: {line, plat, id, nick}; on the title or a day separator, the first message below
+  for (let q = r, n = 0; q >= 0 && n < 400; q--, n++) {
+    const m = ST_HEAD.exec(S.lines[q] || "");
+    if (m) return { line: q, plat: m[2], id: m[3], nick: m[4] };
+    if (/^--- /.test(S.lines[q] || "")) break;
+  }
+  for (let q = r + 1; q < Math.min(S.lines.length, r + 6); q++) {
+    const m = ST_HEAD.exec(S.lines[q] || "");
+    if (m) return { line: q, plat: m[2], id: m[3], nick: m[4] };
+  }
+  return null;
+}
+function olPlatform(h) { const m = /^\*+\s+\S+\s+\S+\s+\S+\s+(\S+)\s/.exec(S.lines[h] || ""); return m ? m[1] : null; }     // the platform column of a list entry
+function vfArg(kind, f) {            // {platform:"grok", search:true} -> "stream:platform:grok:search"; no filters -> "stream:all"
+  const e = Object.entries(f || {}); return kind + ":" + (e.length ? e.map(([k, v]) => v === true ? k : k + ":" + v).join(":") : "all");
+}
+function vfTitle(kind, f, text) {
+  const w = []; for (const [k, v] of Object.entries(f || {})) w.push(k === "search" ? JSON.stringify(text || "") : k === "limit" ? "limit: " + (text || "") : k === "thread" ? "thread " + v : v);
+  return (w.length ? w.join(" · ") + " " : "all ") + (kind === "list" ? "threads" : "messages");
+}
+function viewArg(k) {                // for a key that opens another view: {arg, title, filters, text}, else null.  Filters add up: P after U keeps the speaker.
+  const mk = (kind, f, text) => ({ arg: vfArg(kind, f), title: vfTitle(kind, f, text), filters: f, text: (f.search || f.limit) ? text : "", kind });
+  if (S.outline) {
+    const h = olInfo().owner[S.cur.r], id = h >= 0 ? olArg(h) : null, pl = h >= 0 ? olPlatform(h) : null;
+    if (k === "P" && pl) return mk("list", { ...S.vf, platform: pl }, S.vtext);
+    if (k === "m" && id) return mk("stream", { thread: id }, "");
+    if (k === "S") return mk("stream", {}, "");
+  }
+  if (S.stream) {
+    const hd = stHeader(S.cur.r);
+    if (k === "L") return mk("list", {}, "");
+    if (k === "S") return mk("stream", {}, "");
+    if (hd && k === "Enter") return mk("stream", { thread: hd.id }, "");        // this thread, whole: every speaker, every round
+    if (hd && k === "P") return mk("stream", { ...S.vf, platform: hd.plat }, S.vtext);
+    if (hd && k === "U") return mk("stream", { ...S.vf, speaker: hd.nick }, S.vtext);
+    if (hd && k === "o") return { arg: "thread:" + hd.id, title: "thread " + hd.id + " (read)", filters: {}, text: "", kind: "thread" };
+  }
+  return null;
+}
+function olTitle(h) { return (S.lines[h] || "").replace(/^\*+\s+/, "").replace(/\s*#[A-Za-z0-9_.:-]+\s*$/, "").trim(); }
+function olArg(h) { const m = /#([A-Za-z0-9_.:-]+)\s*$/.exec(S.lines[h] || ""); return m ? m[1] : null; }
+
+function toggleMarkdown() {
+  S.markdown = !S.markdown; MD.cache.clear();
+  setCursor(S.cur.r, S.cur.c);
+  flash(S.markdown ? "rendered markdown  (zm: raw text)" : "raw text  (zm: rendered markdown)");
+}
 function lineNode(i) {
   const d = document.createElement("div"); d.className = "line"; d.dir = "auto"; d.dataset.i = i;
-  const text = S.lines[i];
+  const text = S.lines[i], md = mdLine(i);
+  if (S.outline) {
+    const ol = olInfo();
+    if (ol.hid[i]) d.style.display = "none";
+    if (ol.lvl[i]) { d.classList.add("ol-h", "ol-h" + Math.min(ol.lvl[i], 4), OL.ex.has(i) ? "ol-open" : "ol-shut"); if (S.cur.r === i) d.classList.add("ol-cur"); }
+  }
+  if (/^\s*[┌├└│]/.test(text)) d.classList.add("tbl");     // a drawn table row: keep it on one line
   if (selectedRow(i)) d.classList.add("selrow");
   if (S.numbers) { const n = document.createElement("span"); n.className = "ln"; n.textContent = i + 1; d.appendChild(n); }
   const ranges = [];
@@ -99,6 +382,11 @@ function lineNode(i) {
   if (S.search) add(S.search.re, i === S.curLine ? "cur" : "hit");
   for (const r of annRangesFor(i)) ranges.push(r);
   for (const r of rvRangesFor(i)) ranges.push(r);
+  if (S.stream) {
+    if (/^--- /.test(text)) d.classList.add("st-day");
+    else { const m = ST_HEAD.exec(text); if (m) { ranges.push([0, m.indices[1][1] + 1, "st-dim"], [m.indices[2][0], m.indices[3][1], "st-dim"], [m.indices[4][0] - 1, m.indices[4][1] + 1, m[4] === "you" ? "st-you" : "st-bot"]); } }
+  }
+  for (const [us, ue] of bareUrls(text)) if (!ranges.some(r => us < r[1] && ue > r[0]) && !(md && md.hides.some(h => us < h[1] && ue > h[0]))) ranges.push([us, ue, "url"]);
   if (S.rvView) { const k = S.rvView.kinds[i]; if (k && k.island >= 0) { const cl = rvLineClasses(k.k, S.rv.islands[k.island].decision); if (cl) cl.split(" ").forEach(c => d.classList.add(c)); if (k.island === S.rvCur) d.classList.add("rv-cur"); } }
   { const k = annRow(i); if (k) { d.classList.add("annrow"); d.classList.add("annrow-" + k); } }
   { const vr = visRangesFor(i), cr = vr.find(r => r[2] === "vcur");       // the cursor block always shows: split other highlights around it
@@ -112,16 +400,31 @@ function lineNode(i) {
       ranges.length = 0; for (const r of out) ranges.push(r); ranges.push(cr);
     } }
   ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-  let pos = 0;
+  let host = d;                      // where text goes: the line, or the current table cell
   const put = (s, e, cls) => {
     if (e <= s) return; const t = text.slice(s, e);
-    if (!cls) { d.appendChild(document.createTextNode(t)); return; }
+    if (!cls) { host.appendChild(document.createTextNode(t)); return; }
     const sp = document.createElement("span");
     if (cls.startsWith("hl:")) { sp.style.background = colorVar(cls.slice(3)) || "var(--hl)"; sp.style.borderRadius = "2px"; } else sp.className = cls;
-    sp.textContent = t; d.appendChild(sp);
+    sp.textContent = t; host.appendChild(sp);
   };
-  for (const r of ranges) { if (r[0] < pos) continue; put(pos, r[0], null); put(r[0], r[1], r[2]); pos = r[1]; }
-  put(pos, text.length, null);
+  const emit = (lo, hi) => {         // text[lo,hi) with the ranges clipped to it
+    let pos = lo;
+    for (const r of ranges) {
+      const s = Math.max(r[0], lo), e = Math.min(r[1], hi);
+      if (e <= s || s < pos) continue;
+      put(pos, s, null); put(s, e, r[2]); pos = e;
+    }
+    put(pos, hi, null);
+  };
+  const cells = tableCells(text);
+  if (md && md.lineCls) for (const c of md.lineCls.split(" ")) d.classList.add(c);
+  if (cells) {                       // a markdown table row: one real table cell per column, so the browser aligns them
+    d.classList.add("trow"); if (isSepRow(text)) d.classList.add("tsep");
+    for (const [cs, ce] of cells) { host = document.createElement("span"); host.className = "cell"; d.appendChild(host); emit(cs, ce); }
+  } else if (md && md.segs.length) { // rendered markdown: one span per run of equally styled (or hidden) text
+    for (const [s, e, cl, href] of md.segs) { if (cl) { host = document.createElement("span"); host.className = cl; if (href) host.title = href; d.appendChild(host); } else host = d; emit(s, e); }
+  } else emit(0, text.length);
   if (!text) {
     if (i === S.cur.r) { const sp = document.createElement("span"); sp.className = "vcur"; sp.textContent = "\u00a0"; d.appendChild(sp); }
     else d.appendChild(document.createTextNode("\u200b"));
@@ -159,6 +462,7 @@ function topForBottom(endIdx) {      // smallest top such that lines top..endIdx
 }
 
 function render() {
+  MD.fence = null;
   S.top = clamp(S.top, 0, Math.max(0, total() - 1));
   S.bottom = total() ? fitFrom(S.top) : -1;
   { const f0 = view.firstElementChild;
@@ -166,8 +470,10 @@ function render() {
   if (pullCursor()) S.bottom = fitFrom(S.top);
   const E = endPos(); S.atEnd = S.top > E.top || (S.top === E.top && S.off >= E.off - 0.5);
   applyHx();
+  if (!S.noFollow && followCursorX()) applyHx();
+  S.noFollow = false;
   const n = total(), shown = S.bottom - S.top + 1;
-  $("bname").textContent = (S.name || "(no file)") + (S.dirty ? " [+]" : "");
+  $("bname").textContent = (S.name || "(no file)") + (S.dirty ? " [+]" : "") + (S.back.length ? "   [Alt-\u2190 back]" : "") + (S.fwd.length ? "  [Alt-\u2192 forward]" : "");
   $("bpos").innerHTML = "";
   const pos = $("bpos");
   if (!n) pos.textContent = "(empty)";
@@ -175,17 +481,52 @@ function render() {
     const pct = Math.round(100 * (S.bottom + 1) / n);
     pos.textContent = `lines ${S.top + 1}-${S.bottom + 1} of ${n} (${pct}%)`;
     if (S.atEnd) { const e = document.createElement("span"); e.className = "end"; e.textContent = "  (END)"; pos.appendChild(e); }
+    const ml = view.querySelector(".more-l"), mr = view.querySelector(".more-r");
+    if (ml || mr) { const t = document.createElement("span"); t.className = "end"; t.textContent = "  table " + (ml ? "◀" : " ") + (mr ? "▶" : " ") + " (zh zl)"; pos.appendChild(t); }
   }
   $("bsrch").textContent = S.rvView ? rvDetail() : S.search ? `/${S.search.src}  ${S.matchLines.length} line${S.matchLines.length === 1 ? "" : "s"}` : "";
   scheduleState();
 }
 
 /* ---------- horizontal scroll (chop mode) ---------- */
-function applyHx() { for (const d of view.children) d.scrollLeft = S.wrap ? 0 : S.hx; }
+function applyHx() {
+  for (const d of view.children) {
+    if (d.classList.contains("trow")) d.style.setProperty("--hx", S.hx + "px");     // table rows always scroll, wrapped or not
+    else d.scrollLeft = (S.wrap && !d.classList.contains("tbl")) ? 0 : S.hx;
+    if (d.classList.contains("tbl")) {                                              // an edge bar where the table runs on
+      d.classList.toggle("more-l", d.scrollLeft > 0);
+      d.classList.toggle("more-r", d.scrollLeft + d.clientWidth < d.scrollWidth - 1);
+    }
+  }
+}
+/* When the cursor is on a table row (or any line, if lines are chopped) and moves toward a side edge, scroll that way to keep it in view,
+   as vim does with sidescroll: h / l / the arrow keys / 0 / $ / w / b all just work. */
+function followCursorX() {
+  const c = view.querySelector(".vcur"), row = c && c.closest(".line");
+  if (!row || !(row.classList.contains("tbl") || !S.wrap)) return false;
+  const rb = row.getBoundingClientRect(), cb = c.getBoundingClientRect();
+  const ln = row.querySelector(".ln"), gut = ln ? ln.offsetWidth : 0;
+  const m = Math.round(6 * 0.6 * parseFloat(getComputedStyle(view).fontSize));            // about six characters of context
+  const left = cb.left - rb.left - gut, right = cb.right - rb.left;
+  let hx = S.hx;
+  if (left < m) hx -= m - left; else if (right > row.clientWidth - m) hx += right - (row.clientWidth - m);
+  hx = clamp(Math.round(hx), 0, Math.max(0, row.scrollWidth - row.clientWidth));
+  if (hx === S.hx) return false;
+  S.hx = hx; return true;
+}
 function hscroll(dir) {
-  if (S.wrap) { flash("lines are wrapped; press w to chop, then h / l scroll sideways"); return; }
+  if (S.wrap && !view.querySelector(".tbl, .trow")) { flash("lines are wrapped; press w to chop, then zh / zl scroll sideways"); return; }
   const step = Math.round(8 * 0.6 * parseFloat(getComputedStyle(view).fontSize));
-  S.hx = dir === 0 ? 0 : Math.max(0, S.hx + dir * step); applyHx();
+  let max = Infinity;                // don't scroll a table past its right edge
+  const rows = view.querySelectorAll(".trow"), boxes = view.querySelectorAll(".tbl");
+  if ((rows.length || boxes.length) && S.wrap) {
+    max = 0;
+    for (const r of boxes) max = Math.max(max, r.scrollWidth - r.clientWidth);
+    for (const r of rows) { const c = r.lastElementChild; if (c) max = Math.max(max, c.offsetLeft + S.hx + c.offsetWidth - view.clientWidth + 20); }
+    max = Math.max(0, max);
+  }
+  S.hx = dir === 0 ? 0 : clamp(S.hx + dir * step, 0, max);
+  S.noFollow = true; render();       // render() re-applies the scroll and refreshes the status-bar hint; the cursor stays where it is
 }
 
 /* ---------- movement ---------- */
@@ -254,6 +595,7 @@ function stepMatch(dir, first = false, quiet = false) {
     next = dir > 0 ? S.matchLines[0] : S.matchLines[S.matchLines.length - 1];
     if (!quiet) flash(dir > 0 ? "search hit BOTTOM, continuing at TOP" : "search hit TOP, continuing at BOTTOM");
   }
+  if (S.outline && olReveal(next) && !quiet) flash("opened the entry");      // a hit inside a closed entry opens it
   S.curLine = next; S.top = next; S.off = 0;
   { const text = S.lines[next] || "", probe = new RegExp(S.search.re.source, S.search.re.flags.replace("g", "")), m = probe.exec(text);
     S.cur = { r: next, c: m ? Array.from(text.slice(0, m.index)).length : 0 }; S.goalX = null; }
@@ -275,6 +617,7 @@ function runPrompt(ch, v) {
     if ((m = /^([%*.$0-9,'<>]*)!(.+)$/.exec(v))) { filterRange(m[1], m[2]); return; }
     if ((m = /^([%*.$0-9,'<>]*)s([^\w\s\\"|].*)$/.exec(v))) { substitute(m[1], m[2][0], m[2].slice(1)); return; }
     if (v === "annotations") { showAnnotations(); return; }
+    if ((m = /^(?:limit|narrow)\s+(.+)$/.exec(v))) { narrow(m[1]); return; }
     if ((m = /^revise(?:\s+(\d+))?$/.exec(v))) { startRevise(m[1] ? { id: +m[1] } : {}); return; }
     if ((m = /^set backend (claude|api)$/.exec(v))) { sendCmd({ cmd: "backend", value: m[1] }).then(j => flash(j.ok ? "backend: " + m[1] : j.error)); return; }
     if ((m = /^annotate\s+(.+)$/.exec(v))) { saveAnnotation({ file: true }, m[1]).then(() => 0); return; }
@@ -286,7 +629,8 @@ function runPrompt(ch, v) {
     else if ((m = v.match(/^(\d+)$/))) gotoLine(+m[1]);
     else if ((m = v.match(/^(\d+)%$/))) gotoPercent(+m[1]);
     else if (v === "help" || v === "h") toggleHelp(true);
-    else if (v === "set numbers" || v === "N") toggleNumbers(); else if (v === "set wrap") toggleWrap(); else flash("Unknown command: " + v);
+    else if (v === "set numbers" || v === "N") toggleNumbers(); else if (v === "set wrap") toggleWrap();
+    else if (v === "set markdown" || v === "set md" || v === "markdown") toggleMarkdown(); else flash("Unknown command: " + v);
   }
 }
 
@@ -331,10 +675,14 @@ function selectedRow(i) {            // is line i inside the selection as a whol
 }
 
 function setCursor(r, c, keepGoal) {
+  const prev = S.cur;
   r = clamp(r, 0, Math.max(0, total() - 1));
-  S.cur = { r, c: clamp(c, 0, Math.max(0, lcp(r).length - 1)) };
+  if (S.outline) { const o = olInfo(); while (r > 0 && o.hid[r]) r--; }          // hidden by a closed entry: stop on the entry
+  c = clamp(c, 0, Math.max(0, lcp(r).length - 1));
+  S.cur = { r, c: mdSnap(r, c, prev && prev.r === r ? prev.c : -1) };
   if (!keepGoal) S.goalX = null;
-  render(); keepCursorVisible();
+  S.keeping = true; try { render(); } finally { S.keeping = false; }      // let the cursor go where it was sent (gg, G, NG, w across the edge) ...
+  keepCursorVisible();                                                    // ... and scroll the view to it, instead of pulling the cursor back
 }
 function keepCursorVisible() {       // scroll so the cursor is on screen, including inside a paragraph taller than the window
   S.keeping = true;
@@ -351,6 +699,7 @@ function pullCursor() {              // the view scrolled by itself: keep the cu
   if (S.keeping || !total()) return false;
   let r = S.cur.r;
   if (r < S.top) r = S.top; else if (r > S.bottom) r = S.bottom > S.top ? S.bottom - 1 : S.bottom;
+  if (S.outline) { const o = olInfo(); while (r < total() - 1 && o.hid[r]) r++; }
   if (r === S.cur.r) return false;
   S.cur = { r, c: 0 }; S.goalX = null; return true;
 }
@@ -485,6 +834,7 @@ function textOf(mode, a, b) {
 }
 
 async function sendCmd(obj) {
+  if (S.back.length && MUTATING.has(obj.cmd)) { flash("read-only: Alt-\u2190 goes back to the list"); return { ok: false, error: "read-only while a thread is open from the list (Alt-Left goes back)" }; }
   try { const r = await fetch("/cmd", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) }); return await r.json(); }
   catch (e) { return { ok: false, error: String(e) }; }
 }
@@ -498,6 +848,60 @@ async function writeFile(force) {
   const j = await sendCmd({ cmd: "write", force: !!force });
   noteResult(j); flash(j.ok ? "written" : "not written: " + j.error); render(); return !!j.ok;
 }
+function snapshot() {
+  return { lines: S.lines, name: S.name, top: S.top, off: S.off, cur: { r: S.cur.r, c: S.cur.c }, hx: S.hx, goalX: S.goalX, ex: new Set(OL.ex), outline: S.outline, stream: S.stream, vf: S.vf, vtext: S.vtext,
+           search: S.search, searchBack: S.searchBack, matchLines: S.matchLines, curLine: S.curLine, marks: S.marks, hls: S.hls };
+}
+function setLines(lines) {
+  S.lines = lines; cpCache.clear(); MD.cache.clear(); MD.fence = null; OL.info = null;
+  view.style.setProperty("--lnw", lnWidth()); measure.style.setProperty("--lnw", lnWidth());
+}
+function pushView(name, text, filters, ftext) {      // show `text` read-only in this window; the list stays exactly as it was underneath
+  S.back.push(snapshot()); S.fwd = [];
+  S.name = name;
+  let lines = text === "" ? [] : text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+  const mk = /^-\*- (outline|stream) -\*-$/.exec(lines[0] || "");          // a narrowed list or stream starts with a marker line
+  if (mk) lines = lines.slice(1);
+  S.outline = !!mk && mk[1] === "outline"; S.stream = !!mk && mk[1] === "stream";
+  OL.ex = new Set(); OL.ver++; OL.info = null;
+  S.vf = filters || {}; S.vtext = ftext || "";
+  setLines(lines);
+  S.top = 0; S.off = 0; S.cur = { r: 0, c: 0 }; S.goalX = null; S.hx = 0; S.vis = null; S.op = null; S.pend = null;
+  S.search = null; S.matchLines = []; S.curLine = -1; S.marks = []; S.hls = [];
+  document.title = name + " - winless"; setMode(); render();
+}
+function restore(s) {               // put a saved view back: same text, same entry, same open entries, same scroll position
+  S.name = s.name; S.outline = s.outline; S.stream = !!s.stream; S.vf = s.vf || {}; S.vtext = s.vtext || ""; OL.ex = new Set(s.ex); OL.ver++;
+  setLines(s.lines);
+  S.top = s.top; S.off = s.off; S.cur = { r: s.cur.r, c: s.cur.c }; S.hx = s.hx; S.goalX = s.goalX; S.vis = null; S.op = null; S.pend = null;
+  S.search = s.search; S.searchBack = s.searchBack; S.matchLines = s.matchLines; S.curLine = s.curLine; S.marks = s.marks; S.hls = s.hls;
+  document.title = (S.name || "winless") + " - winless"; setMode(); render();
+}
+function goBack() {                  // Alt-Left, as in a browser (q still means quit)
+  if (!S.back.length) { flash("already at the start"); return; }
+  S.fwd.push(snapshot()); restore(S.back.pop());
+}
+function goForward() {               // Alt-Right: return to the thread you just came back from
+  if (!S.fwd.length) { flash("nothing to go forward to"); return; }
+  S.back.push(snapshot()); restore(S.fwd.pop());
+}
+async function hookOpen(arg, text, title, filters) {      // ask the server's hook for a view and show it here; Alt-Left returns
+  flash("opening...");
+  const j = await sendCmd({ cmd: "hook", arg, text });
+  if (!j.ok) { flash(j.error || "could not open"); return; }
+  pushView(title || arg, j.text || "", filters, text);
+}
+function openEntry(h) {              // Enter on a list entry: read that thread
+  const id = olArg(h); if (!id) { olToggle(h); return; }
+  hookOpen("thread:" + id, null, olTitle(h), {});
+}
+function narrow(text) {              // :limit PATTERN (or :narrow) -- like mutt's l: the threads (in a list) or messages (in a stream) matching the pattern, on top of any filters already applied
+  const kind = S.outline ? "list" : S.stream ? "stream" : null;
+  if (!kind) { flash("limit works in a list or a stream"); return; }
+  const f = { ...S.vf, limit: true }; delete f.search;                 // a new pattern replaces the old one
+  hookOpen(vfArg(kind, f), text, vfTitle(kind, f, text), f);
+}
+const MUTATING = new Set(["edit", "undo", "redo", "write", "filter", "annotate", "unannotate", "revise", "review", "revert", "backend"]);
 function tryQuit(force) { if (S.dirty && !force) flash("unsaved changes: :wq saves and quits, :q! discards them and quits"); else quit(); }
 function setRegister(text, linewise) {
   S.reg = { text, linewise };
@@ -545,8 +949,9 @@ function pendingKey(k) {             // g, z and r prefixes in normal mode
   if (p === "g") {
     if (k === "g") { const row = gotoRow(0, "gg"); setCursor(row, 0); }
     else if (k === "v") reselect();
+    else if (k === "x") { const u = linkAt(S.cur.r, S.cur.c, true); if (u) openLink(u); else flash("no link on this line"); }     // gx, as in vim
     else if (k === "r") startRevise({});                                              // gr: revise this file from its open notes
-  } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); }
+  } else if (p === "z") { if (k === "h") hscroll(-1); else if (k === "l") hscroll(1); else if (k === "0") hscroll(0); else if (k === "m") toggleMarkdown(); else if (S.outline) olZ(k); }
   else if (p === "!") { if (k === "!") openPrompt(":", ".!"); }                           // !! filters the current line
   else if (p === "]" || p === "[") { if (k === "a") nextAnnotation(p === "]" ? 1 : -1); }
   else if (p === "r") {
@@ -559,6 +964,9 @@ function normKey(k) {
   if (S.op) return pendingOperator(k);
   if (S.pend) return pendingKey(k);
   if (countKey(k)) return true;
+  if ((S.outline || S.stream) && k === "f") { openPrompt(":", "limit "); return true; }          // as mutt's l: type a pattern
+  if (S.outline || S.stream) { const va = viewArg(k); if (va) { hookOpen(va.arg, va.text || null, va.title, va.filters); return true; } }
+  if (S.outline && olKey(k)) return true;
   switch (k) {
     case "h": case "ArrowLeft": case "l": case "ArrowRight": case "0": case "Home": case "$": case "End":
     case "w": case "b": case "e": case ")": case "(": case "}": case "{": moveBy(k, takeCount()); return true;
@@ -1002,7 +1410,9 @@ document.addEventListener("mouseup", e => {
   if (S.prompt || S.panel || e.target.closest && e.target.closest("#bar, #panel, #help")) return;
   const sel = getSelection();
   if (!sel || sel.isCollapsed || !sel.anchorNode) {                               // a plain click
-    const p = caretAt(e.clientX, e.clientY); if (p) setCursor(p.r, p.c);
+    const p = caretAt(e.clientX, e.clientY);
+    if (p && e.target.closest && e.target.closest(".url, .md-link")) { const u = linkAt(p.r, Math.max(0, p.c - 1), true); if (u) openLink(u); }
+    if (p) setCursor(p.r, p.c);
     return;
   }
   const a = domPos(sel.anchorNode, sel.anchorOffset), f = domPos(sel.focusNode, sel.focusOffset); if (!a || !f) return;
@@ -1029,7 +1439,11 @@ const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table
 <tr><td><b>Space</b> PgDn / PgUp</td><td>page down / up (the cursor follows); <b>Ctrl-f Ctrl-b</b> page, <b>Ctrl-d Ctrl-u</b> half page, <b>Ctrl-e Ctrl-y</b> line</td></tr>
 <tr><td><b>/</b>pat <b>?</b>pat <b>n</b> <b>N</b></td><td>search (smart-case regex); n and N wrap around; the cursor lands on the match</td></tr>
 <tr><td><b>:</b>123 <b>:</b>50%</td><td>go to line / percent</td></tr>
-<tr><td><b>-N</b> or <b>#</b> / <b>-S</b></td><td>toggle line numbers / wrap and chop; <b>zh zl z0</b> scroll sideways when chopped</td></tr>
+<tr><td><b>-N</b> or <b>#</b> / <b>-S</b></td><td>toggle line numbers / wrap and chop; <b>zh zl z0</b> scroll sideways when chopped, and always for drawn tables (rows starting with a box-drawing character)</td></tr>
+<tr><td><b>click</b> a link, or <b>gx</b></td><td>open the link under the cursor (or the next one on the line): markdown links and http(s):// / mailto: addresses</td></tr>
+<tr><td><b>P</b> <b>S</b> <b>m</b> in a list, <b>Enter</b> <b>P</b> <b>U</b> <b>o</b> <b>L</b> <b>S</b> in a stream, <b>f</b> or <b>:limit PATTERN</b> (and <b>/</b> in the list)</td><td>narrow the list or stream to a platform, thread, speaker or a pattern, or switch between the list and the stream; <b>Alt-Left</b> widens it again.  A pattern is like mutt's: <b>word</b> anywhere, <b>~s</b> title or summary, <b>~b</b> any message, <b>~u</b> what you said, <b>~a</b> what the LLM replied, <b>~k</b> thinking, <b>~p</b> platform, <b>~d</b> / <b>~c</b> last / first date (2026-03..2026-06, &gt;2026-03-05, &lt;2w), <b>~r</b> rounds (&gt;10); space = and, <b>|</b> or, <b>!</b> not, ( ) group; e.g. <b>~u shekel !~a talent ~d 2026</b></td></tr>
+<tr><td><b>Tab</b> / <b>l</b> <b>h</b> on an entry</td><td>in a list (--outline): open / close the entry; <b>za zo zc zR zM</b> as in vim; <b>Enter</b> opens the thread here; <b>Alt-Left</b> comes back to the list as you left it, <b>Alt-Right</b> goes forward again (<b>q</b> quits)</td></tr>
+<tr><td><b>zm</b> or <b>:set markdown</b></td><td>toggle rendered markdown (bold, italic, headings, code, links, quotes, bullets) and the raw text</td></tr>
 <tr><td><b>t</b> / ctrl +&minus;</td><td>dark / light; font size</td></tr>
 <tr><td><b>F1</b> or <b>:</b>help &nbsp; <b>q</b></td><td>this help; quit (refuses with unsaved changes)</td></tr></table>
 <h3>selecting and editing</h3><table>
@@ -1064,7 +1478,7 @@ function handleKey(k, e) {
   switch (k) {
     case " ": case "PageDown": pageDown(); break;
     case "PageUp": pageUp(); break;
-    case "/": openPrompt("/"); break; case "?": openPrompt("?"); break; case ":": openPrompt(":"); break;
+    case "/": if (S.outline) openPrompt(":", "limit "); else openPrompt("/"); break;      // in the thread list, / narrows (as f does); in a thread or a log it is the ordinary text search case "?": openPrompt("?"); break; case ":": openPrompt(":"); break;
     case "n": stepMatch(S.searchBack ? -1 : 1); break; case "N": stepMatch(S.searchBack ? 1 : -1); break;
     case "-": pendingDash = true; break; case "#": toggleNumbers(); break;
     case "t": toggleTheme(); break; case "F1": toggleHelp(true); break; case "q": tryQuit(false); break;
@@ -1080,6 +1494,7 @@ document.addEventListener("keydown", e => {
     const c = { d: () => pageDown(0.5), u: () => pageUp(0.5), f: () => pageDown(), b: () => pageUp(), e: () => lineDown(), y: () => lineUp(), r: () => redoEdit() }[e.key];
     if (c) { c(); e.preventDefault(); return; }
   }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.key === "ArrowLeft") goBack(); else goForward(); e.preventDefault(); return; }   // not the browser's own history
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (handleKey(e.key, e)) e.preventDefault();
 });
@@ -1095,6 +1510,11 @@ function geom() {                   // where things actually are on screen (for 
   const c = view.querySelector(".vcur"), cb = c ? c.getBoundingClientRect() : null;
   return { inner: [innerWidth, innerHeight], view: r("view"), bar: r("bar"), panel: r("panel"), panelDisplay: getComputedStyle($("panel")).display,
            cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null,
+           outline: { on: S.outline, stream: S.stream, fwd: S.fwd.length, entries: S.outline ? olInfo().lvl.filter(Boolean).length : 0, open: OL.ex.size, depth: S.back.length, hiddenLines: view.querySelectorAll('.line[style*="display: none"]').length },
+           prompt: { open: !!S.prompt, ch: S.prompt || null, text: $("pin").value },
+           md: { on: S.markdown, hidden: view.querySelectorAll(".md-hide").length, bold: view.querySelectorAll(".md-b").length, italic: view.querySelectorAll(".md-i").length,
+                 code: view.querySelectorAll(".md-code").length, heads: view.querySelectorAll(".md-h").length, links: view.querySelectorAll(".md-link").length, urls: view.querySelectorAll(".url").length },
+           tables: { rows: view.querySelectorAll(".tbl, .trow").length, moreL: view.querySelectorAll(".more-l").length, moreR: view.querySelectorAll(".more-r").length, hx: S.hx },
            anns: S.anns.length, underlined: view.querySelectorAll(".ann").length, marked: view.querySelectorAll(".annrow").length,
            rvDel: view.querySelectorAll(".rv-del").length, rvAdd: view.querySelectorAll(".rv-add").length, wdDel: view.querySelectorAll(".wd-del").length, wdAdd: view.querySelectorAll(".wd-add").length,
            mode: $("bmode").textContent, detail: $("bsrch").textContent };
@@ -1107,6 +1527,7 @@ function sendState() {
          visible: Array.from(view.children).map(c => c.textContent.replace(/^\d+/, "").slice(0, 2000)).slice(0, 80) });
 }
 async function loadContent(keep = false) {
+  S.back = []; S.fwd = [];           // the server's text was replaced: whatever was open from the list is gone
   const r = await fetch("/content", { cache: "no-store" }); const j = await r.json();
   S.name = j.name || ""; S.path = j.path || null; S.dirty = !!j.dirty; S.undo = j.undo || 0; S.anns = j.annotations || []; S.nl = /\n$/.test(j.text || "\n");
   S.lines = j.text === "" ? [] : j.text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n"); cpCache.clear();
@@ -1129,6 +1550,10 @@ function applySettings(s) {
   if (s.theme) toggleTheme(s.theme); if (s.font || s.size) setFont(s.font, s.size);
   if (s.numbers !== undefined && s.numbers !== null && s.numbers !== S.numbers) { S.numbers = s.numbers; }
   if (s.wrap !== undefined && s.wrap !== null) S.wrap = s.wrap;
+  if (s.markdown !== undefined && s.markdown !== null && s.markdown !== S.markdown) { S.markdown = s.markdown; MD.cache.clear(); }
+  if (s.outline !== undefined && s.outline !== null && s.outline !== S.outline) { S.outline = s.outline; MD.cache.clear(); OL.info = null; }
+  if (s.stream !== undefined && s.stream !== null && s.stream !== S.stream) { S.stream = s.stream; MD.cache.clear(); }
+  S.hasHook = !!s.hook;
 }
 function onCommand(c) {
   switch (c.cmd) {
