@@ -101,8 +101,8 @@ S.outline = false;
 S.outline = false; S.stream = true;
 const STREAM = ["stream: 3 messages", "", "--- 2026-03-01 ---", "[10:00] web#468 <you> how heavy?", "[10:00] web#468 <bot> about 11 g", "    more of it", "", "    still more", "[10:03] grok#915 <you> news?"];
 function inStream(r) { S.lines = STREAM; S.cur = { r, c: 0 }; MD_reset(); }
-t("a stream line's header: thread, platform, speaker", () => { inStream(3); const h = mod.stHeader(3); assert.deepStrictEqual([h.id, h.plat, h.nick, h.line], ["468", "claude", "you", 3]); });
-t("continuation lines (and blank ones) belong to the message above", () => { inStream(7); const h = mod.stHeader(7); assert.deepStrictEqual([h.id, h.nick, h.line], ["468", "claude", 4]); });
+t("a stream line's header: thread, platform, speaker", () => { inStream(3); const h = mod.stHeader(3); assert.deepStrictEqual([h.id, h.plat, h.nick, h.line], ["468", "web", "you", 3]); });
+t("continuation lines (and blank ones) belong to the message above", () => { inStream(7); const h = mod.stHeader(7); assert.deepStrictEqual([h.id, h.nick, h.line], ["468", "bot", 4]); });
 t("on the title or a day separator, the first message below is used", () => { inStream(2); assert.strictEqual(mod.stHeader(2).line, 3); inStream(0); assert.strictEqual(mod.stHeader(0).line, 3); });
 t("far from any message there is none", () => { S.lines = ["title", "", "", "", "", "", "", "", "x"]; MD_reset(); assert.strictEqual(mod.stHeader(0), null); });
 t("stream keys: Enter narrows to the thread, P the platform, U the speaker, o opens it", () => {
@@ -121,7 +121,7 @@ t("narrowing keys add up: P after U keeps the speaker; Enter then reads the thre
   S.vf = { search: true }; S.vtext = "zebra"; v = mod.viewArg("P"); assert.deepStrictEqual([v.arg, v.text], ["stream:search:platform:grok", "zebra"]);
   S.vf = {}; S.vtext = "";
 });
-t("stream keys on the title line act on the first message", () => { inStream(0); S.vf = {}; assert.strictEqual(mod.viewArg("Enter").arg, "stream:thread:468"); assert.strictEqual(mod.viewArg("P").arg, "stream:platform:claude"); });
+t("stream keys on the title line act on the first message", () => { inStream(0); S.vf = {}; assert.strictEqual(mod.viewArg("Enter").arg, "stream:thread:468"); assert.strictEqual(mod.viewArg("P").arg, "stream:platform:web"); });
 t("a limit pattern is kept when narrowing further, and shown in the title", () => {
   inStream(8); S.vf = { limit: true }; S.vtext = "~u shekel !~a talent";
   const v = mod.viewArg("P"); assert.deepStrictEqual([v.arg, v.text, v.filters], ["stream:limit:platform:grok", "~u shekel !~a talent", { limit: true, platform: "grok" }]);
@@ -249,6 +249,21 @@ t("narrowing by platform keeps the sort order", () => {
   S.vf = {};
 });
 t("the hint row offers o sort in a list that has a hook", () => { S.outline = true; S.stream = false; S.hasHook = true; S.back = []; assert(keysOf().split(" ").includes("o")); });
+
+// a platform tag with a box: note@alpha
+t("a stream line whose platform carries a box is still a message header", () => {
+  S.outline = false; S.stream = true; S.lines = ["--- 2026-03-01 ---", "[10:00] note@alpha#468 <you> how heavy?", "    more"]; S.cur = { r: 2, c: 0 };
+  const h = mod.stHeader(2); assert.deepStrictEqual([h.plat, h.id, h.nick, h.line], ["note@alpha", "468", "you", 1]);
+  assert.strictEqual(mod.stInfo().count, 1);
+});
+t("P in a stream narrows to the platform with its box", () => {
+  S.outline = false; S.stream = true; S.lines = ["[10:00] note@alpha#468 <you> how heavy?"]; S.cur = { r: 0, c: 0 }; S.vf = {};
+  const v = mod.viewArg("P"); assert.deepStrictEqual([v.arg, v.filters], ["stream:platform:note@alpha", { platform: "note@alpha" }]);
+});
+t("P in a list narrows to the tag in the list, box included", () => {
+  S.outline = true; S.stream = false; outline(["* 2026-01-01  2026-01-02   2r  note@alpha  Some title  #77", "  body"]); S.cur = { r: 0, c: 0 }; S.vf = {};
+  assert.strictEqual(mod.olPlatform(0), "note@alpha"); assert.strictEqual(mod.viewArg("P").arg, "list:platform:note@alpha");
+});
 
 // A `case` label written after a `//` on the same line is part of the comment: the key silently does nothing
 // (this once killed `:` and `?` in normal mode, and no test sends keys).

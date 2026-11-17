@@ -955,7 +955,7 @@ static void hook_command(const jv *v, sb_t *r) {
     if (!H.hook || !*H.hook) { put_result(r, "this window has no command (open it with --hook CMD)"); return; }
     if (!arg || !*arg || strlen(arg) > 64) { put_result(r, "bad argument"); return; }
     for (const char *p = arg; *p; p++)
-        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.' || *p == ':' || *p == '-')) { put_result(r, "bad argument"); return; }
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.' || *p == ':' || *p == '-' || *p == '@')) { put_result(r, "bad argument"); return; }
     sb_t cmd; sb_init(&cmd);
     for (const char *p = H.hook; *p; p++) { if (p[0] == '{' && p[1] == '}') { sb_puts(&cmd, arg); p++; } else sb_putc(&cmd, *p); }
     sb_t out, er; sb_init(&out); sb_init(&er); int status = 0;

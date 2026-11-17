@@ -360,6 +360,10 @@ static void t_hook_returns_the_command_output_and_refuses_bad_arguments(void) {
     r = post_json("/cmd", "{\"cmd\":\"hook\",\"arg\":\"42\"}");
     CHECK_INT(json_getbool(r, "ok", 0), 1); CHECK_STR(json_gets(r, "text", NULL), "thread-42\nok\n");
     json_free(r);
+    /* a platform tag with a box (note@alpha) is a plain word for the shell */
+    r = post_json("/cmd", "{\"cmd\":\"hook\",\"arg\":\"list:platform:note@alpha\"}");
+    CHECK_INT(json_getbool(r, "ok", 0), 1); CHECK_STR(json_gets(r, "text", NULL), "thread-list:platform:note@alpha\nok\n");
+    json_free(r);
     /* the argument is limited to letters, digits and _ . : - ; nothing else reaches the shell */
     const char *bad[] = { "{\"cmd\":\"hook\",\"arg\":\"1;id\"}", "{\"cmd\":\"hook\",\"arg\":\"$(id)\"}", "{\"cmd\":\"hook\",\"arg\":\"a b\"}",
                           "{\"cmd\":\"hook\",\"arg\":\"\"}", "{\"cmd\":\"hook\"}" };

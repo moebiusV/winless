@@ -326,7 +326,7 @@ function olKey(k) {                  // true when the key was an outline key
   return false;
 }
 /* ---------- a stream (--stream): "[10:00] claude#468 <you> text", continuation lines indented; keys narrow it, o opens the whole thread ---------- */
-const ST_HEAD = /^\[(\d\d:\d\d|--:--)\] ([A-Za-z_]+)#(\d+) <([^>\s]+)>/d;
+const ST_HEAD = /^\[(\d\d:\d\d|--:--)\] ([A-Za-z_][A-Za-z0-9_.@-]*)#(\d+) <([^>\s]+)>/d;      // the platform tag may carry a box: note@alpha
 function stHeader(r) {               // the message line r belongs to: {line, plat, id, nick}; on the title or a day separator, the first message below
   for (let q = r, n = 0; q >= 0 && n < 400; q--, n++) {
     const m = ST_HEAD.exec(S.lines[q] || "");
