@@ -6,11 +6,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#14161a; --fg:#d9dde3; --dim:#7d8590; --bar:#232831; --mark:#5b4a00; --hl:#274a73;
-          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --ann:#e0b050; --annslop:#e06c75; --annkeep:#7ec07e; --padb:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
+          --cur:#b3541e; --curfg:#fff; --sel:#2f5d8a; --vcur:#e0b050; --ann:#e0b050; --annslop:#e06c75; --annkeep:#7ec07e; --padb:0px; --hintsh:0px; --font:"Cascadia Mono","Consolas","DejaVu Sans Mono",monospace; --size:17px; }
   :root.light { --bg:#fbfaf6; --fg:#22252a; --dim:#7a7468; --bar:#e8e3d6; --mark:#fff0a8; --hl:#cfe3ff;
           --cur:#ffb27a; --curfg:#000; --sel:#b7d4f5; --vcur:#e0a020; --ann:#b07a00; --annslop:#b3262e; --annkeep:#2e7d32; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden; }
-  #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
+  #view { position:absolute; left:0; right:0; top:0; bottom:calc(var(--barh,28px) + var(--hintsh,0px) + var(--padb,0px)); overflow:hidden; padding:2px 10px;
           font:var(--size)/1.38 var(--font); box-sizing:border-box; }
   .line { white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; min-height:1.38em; }
   .chop .line, .line.tbl { white-space:pre; overflow:hidden; text-overflow:clip; }   /* .tbl: box-drawing table rows never wrap; zh/zl scroll them */
@@ -33,6 +33,9 @@
   .line.ol-h::before { content:"\25b8\00a0"; color:var(--dim); } .line.ol-h.ol-open::before { content:"\25be\00a0"; }
   .line.ol-h2 { padding-left:2ch; } .line.ol-h3 { padding-left:4ch; } .line.ol-h4 { padding-left:6ch; }
   .line.ol-h.ol-cur { background:var(--sel); }
+  /* the bar stays on the entry the cursor is in, dimmer while the cursor itself is on one of its body lines; in a log or a list's body the cursor's own row is barred */
+  .line.ol-h.ol-own { background:color-mix(in srgb, var(--sel) 38%, var(--bg)); }
+  .line.cur-row { background:var(--sel); }
   .line.ol-h .vcur { background:transparent; box-shadow:none; color:inherit; }
   .md-b { font-weight:700; } .md-i { font-style:italic; } .md-s { text-decoration:line-through; }
   .md-code { background:var(--bar); border-radius:3px; padding:0 .3ch; }
@@ -66,11 +69,15 @@
   .annrow { box-shadow:inset 3px 0 0 var(--ann); }
   .annrow-slop { box-shadow:inset 3px 0 0 var(--annslop); }
   .annrow-keep { box-shadow:inset 3px 0 0 var(--annkeep); }
-  #panel { display:none; position:absolute; left:0; right:0; bottom:var(--barh,28px); background:var(--bar); padding:6px 10px;
+  #panel { display:none; position:absolute; left:0; right:0; bottom:calc(var(--barh,28px) + var(--hintsh,0px)); background:var(--bar); padding:6px 10px;
            box-sizing:border-box; border-top:1px solid var(--dim); }
   #panel .title { color:var(--dim); font:12px var(--font); height:18px; }
   #panel textarea { width:100%; height:calc(100% - 20px); background:var(--bg); color:var(--fg); border:1px solid var(--dim);
                     font:var(--size)/1.38 var(--font); resize:none; box-sizing:border-box; outline:0; }
+  /* pine's key hints: one row above the bar in a list, a log, or a thread opened from a list; --hintsh is 0px when there are none */
+  #hints { display:none; position:absolute; left:0; right:0; bottom:var(--barh,28px); height:var(--hintsh,0px); box-sizing:border-box; padding:0 10px;
+           background:var(--bg); color:var(--dim); border-top:1px solid var(--bar); font:13px/22px var(--font); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #hints b { color:var(--fg); font-weight:700; } #hints span { margin-right:1.6ch; }
   #bar .mode { color:#e0b050; font-weight:bold; }
   #measure { position:absolute; visibility:hidden; left:0; right:0; top:0; height:auto; overflow:visible; padding:2px 10px;
              font:var(--size)/1.38 var(--font); box-sizing:border-box; pointer-events:none; }
@@ -83,7 +90,7 @@
   #bar .end { color:#e0b050; }
   #prompt { display:none; flex:1; }
   #prompt input { background:transparent; border:0; outline:0; color:var(--fg); font:14px var(--font); width:calc(100% - 2ch); }
-  #help { display:none; position:absolute; inset:0 0 var(--barh,28px) 0; background:var(--bg); padding:18px 28px;
+  #help { display:none; position:absolute; inset:0 0 calc(var(--barh,28px) + var(--hintsh,0px)) 0; background:var(--bg); padding:18px 28px;
           font:15px/1.5 var(--font); overflow:auto; }
   #help b { color:#e0b050; } #help td { padding:1px 18px 1px 0; vertical-align:top; }
   #flash { position:absolute; right:14px; top:8px; background:var(--bar); color:var(--fg); padding:4px 10px;
@@ -96,6 +103,7 @@
 <div id="help"></div>
 <div id="flash"></div>
 <div id="panel"><div class="title" id="ptitle"></div><textarea id="ptxt" spellcheck="false"></textarea></div>
+<div id="hints"></div>
 <div id="bar"><span class="mode" id="bmode"></span><span class="name" id="bname"></span><span class="pos" id="bpos"></span><span class="srch" id="bsrch"></span>
   <span id="prompt"><span id="pch">/</span><input id="pin" autocomplete="off" spellcheck="false"></span></div>
 
@@ -265,17 +273,18 @@ function openLink(url) {
 const OL = { info: null, ex: new Set(), ver: 0 };
 function olInfo() {                  // per line: heading level (0 = body), whether a closed heading hides it, and the heading it belongs to
   if (OL.info && OL.info.n === S.lines.length && OL.info.v === OL.ver) return OL.info;
-  const n = S.lines.length, lvl = new Uint8Array(n), hid = new Uint8Array(n), owner = new Int32Array(n).fill(-1), stack = [];
+  const n = S.lines.length, lvl = new Uint8Array(n), hid = new Uint8Array(n), owner = new Int32Array(n).fill(-1), rank = new Int32Array(n), stack = [];
+  let count = 0;                       // rank: the entry (1-based, in order) each line belongs to, 0 above the first
   for (let i = 0; i < n; i++) {
     const m = /^(\*+)\s/.exec(S.lines[i]);
     if (m) {
       const L = Math.min(m[1].length, 255);
       while (stack.length && stack[stack.length - 1].level >= L) stack.pop();
-      hid[i] = stack.some(x => !x.open) ? 1 : 0; lvl[i] = L; owner[i] = i;
+      hid[i] = stack.some(x => !x.open) ? 1 : 0; lvl[i] = L; owner[i] = i; rank[i] = ++count;
       stack.push({ level: L, open: OL.ex.has(i) });
-    } else { hid[i] = stack.some(x => !x.open) ? 1 : 0; owner[i] = stack.length ? olOwnerLine(owner, i) : -1; }
+    } else { hid[i] = stack.some(x => !x.open) ? 1 : 0; owner[i] = stack.length ? olOwnerLine(owner, i) : -1; rank[i] = owner[i] >= 0 ? rank[owner[i]] : 0; }
   }
-  return (OL.info = { n, v: OL.ver, lvl, hid, owner });
+  return (OL.info = { n, v: OL.ver, lvl, hid, owner, rank, count });
 }
 function olOwnerLine(owner, i) { for (let k = i - 1; k >= 0; k--) if (owner[k] >= 0 && owner[k] === k) return k; return -1; }      // nearest heading above
 function olReveal(r) {              // open every closed entry that hides line r (a search hit lands there); true if any was opened
@@ -357,6 +366,31 @@ function viewArg(k) {                // for a key that opens another view: {arg,
   }
   return null;
 }
+const STI = { lines: null, n: -1, rank: null, count: 0 };
+function stInfo() {                  // per line: which message it belongs to (1-based, 0 above the first), and how many there are (computed once per text)
+  if (STI.lines === S.lines && STI.n === S.lines.length) return STI;
+  const n = S.lines.length, rank = new Int32Array(n); let k = 0;
+  for (let i = 0; i < n; i++) { if (ST_HEAD.test(S.lines[i])) k++; rank[i] = k; }
+  STI.lines = S.lines; STI.n = n; STI.rank = rank; STI.count = k;
+  return STI;
+}
+function barPos() {                  // where the cursor is, for the bar: "entry 12 of 3094 (0%)" in a list, "message 5 of 300 (2%)" in a log; null elsewhere
+  if (!S.outline && !S.stream) return null;
+  const o = S.outline ? olInfo() : stInfo(), r = S.cur ? S.cur.r : 0, word = S.outline ? "entry" : "message", cnt = o.count;
+  if (!cnt) return S.outline ? "no entries" : "no messages";
+  const k = (r >= 0 && r < o.rank.length ? o.rank[r] : 0) || 1;        // above the first entry the cursor counts as on the first
+  return `${word} ${k} of ${cnt} (${Math.round(100 * k / cnt)}%)`;
+}
+function hintKeys() {                // pine's key hints for the view: [[key, what it does] ...]; none in a plain text.  Esc/q always quit the window.
+  const back = S.back.length ? [["Alt-\u2190", "back"]] : [];
+  if (S.outline) {
+    if (!S.hasHook) return [["Tab", "fold"], ["Enter", "fold"], ["/", "limit"], ["?", "help"], ["q", "quit"]];
+    return [["Enter", "read"], ["Tab", "fold"], ["f", "limit"], ["P", "platform"], ["m", "log"], ["S", "stream"], ...back, ["?", "help"], ["q", "quit"]];
+  }
+  if (S.stream) return [["Enter", "thread"], ["P", "platform"], ["U", "speaker"], ["o", "read"], ["L", "list"], ["f", "limit"], ...back, ["?", "help"], ["q", "quit"]];
+  if (S.back.length) return [["Alt-\u2190", "back to the list"], ["/", "search"], ["n", "next"], ["F1", "help"], ["q", "quit"]];      // a thread opened from a list; there ? is the backward search
+  return [];
+}
 function olTitle(h) { return (S.lines[h] || "").replace(/^\*+\s+/, "").replace(/\s*#[A-Za-z0-9_.:-]+\s*$/, "").trim(); }
 function olArg(h) { const m = /#([A-Za-z0-9_.:-]+)\s*$/.exec(S.lines[h] || ""); return m ? m[1] : null; }
 
@@ -371,8 +405,9 @@ function lineNode(i) {
   if (S.outline) {
     const ol = olInfo();
     if (ol.hid[i]) d.style.display = "none";
-    if (ol.lvl[i]) { d.classList.add("ol-h", "ol-h" + Math.min(ol.lvl[i], 4), OL.ex.has(i) ? "ol-open" : "ol-shut"); if (S.cur.r === i) d.classList.add("ol-cur"); }
+    if (ol.lvl[i]) { d.classList.add("ol-h", "ol-h" + Math.min(ol.lvl[i], 4), OL.ex.has(i) ? "ol-open" : "ol-shut"); if (S.cur.r === i) d.classList.add("ol-cur"); else if (ol.owner[S.cur.r] === i) d.classList.add("ol-own"); }
   }
+  if ((S.outline || S.stream) && S.cur.r === i && !d.classList.contains("ol-h")) d.classList.add("cur-row");
   if (/^\s*[┌├└│]/.test(text)) d.classList.add("tbl");     // a drawn table row: keep it on one line
   if (selectedRow(i)) d.classList.add("selrow");
   if (S.numbers) { const n = document.createElement("span"); n.className = "ln"; n.textContent = i + 1; d.appendChild(n); }
@@ -461,7 +496,21 @@ function topForBottom(endIdx) {      // smallest top such that lines top..endIdx
   return top;
 }
 
+let hintsShown = "";
+function setHints() {                // show or hide the hint row; before anything is measured, since it changes the height of the view
+  const keys = S.hints === false ? [] : hintKeys(), h = $("hints"), sig = JSON.stringify(keys);
+  if (sig !== hintsShown) {
+    hintsShown = sig; h.textContent = "";
+    for (const [k, w] of keys) {
+      const sp = document.createElement("span"), b = document.createElement("b");
+      b.textContent = k; sp.appendChild(b); sp.appendChild(document.createTextNode(" " + w)); h.appendChild(sp);
+    }
+    h.style.display = keys.length ? "block" : "none";
+    document.documentElement.style.setProperty("--hintsh", keys.length ? "22px" : "0px");
+  }
+}
 function render() {
+  setHints();
   MD.fence = null;
   S.top = clamp(S.top, 0, Math.max(0, total() - 1));
   S.bottom = total() ? fitFrom(S.top) : -1;
@@ -479,7 +528,7 @@ function render() {
   if (!n) pos.textContent = "(empty)";
   else {
     const pct = Math.round(100 * (S.bottom + 1) / n);
-    pos.textContent = `lines ${S.top + 1}-${S.bottom + 1} of ${n} (${pct}%)`;
+    pos.textContent = barPos() || `lines ${S.top + 1}-${S.bottom + 1} of ${n} (${pct}%)`;     // a list or a log says which entry or message; a text says which lines
     if (S.atEnd) { const e = document.createElement("span"); e.className = "end"; e.textContent = "  (END)"; pos.appendChild(e); }
     const ml = view.querySelector(".more-l"), mr = view.querySelector(".more-r");
     if (ml || mr) { const t = document.createElement("span"); t.className = "end"; t.textContent = "  table " + (ml ? "◀" : " ") + (mr ? "▶" : " ") + " (zh zl)"; pos.appendChild(t); }
@@ -629,6 +678,7 @@ function runPrompt(ch, v) {
     else if ((m = v.match(/^(\d+)$/))) gotoLine(+m[1]);
     else if ((m = v.match(/^(\d+)%$/))) gotoPercent(+m[1]);
     else if (v === "help" || v === "h") toggleHelp(true);
+    else if (v === "set hints" || v === "set nohints") { S.hints = v === "set hints"; render(); flash(S.hints ? "key hints on" : "key hints off"); }
     else if (v === "set numbers" || v === "N") toggleNumbers(); else if (v === "set wrap") toggleWrap();
     else if (v === "set markdown" || v === "set md" || v === "markdown") toggleMarkdown(); else flash("Unknown command: " + v);
   }
@@ -1443,6 +1493,8 @@ const HELP = `<h3>winless &mdash; keys (vim, with less for scrolling)</h3><table
 <tr><td><b>click</b> a link, or <b>gx</b></td><td>open the link under the cursor (or the next one on the line): markdown links and http(s):// / mailto: addresses</td></tr>
 <tr><td><b>P</b> <b>S</b> <b>m</b> in a list, <b>Enter</b> <b>P</b> <b>U</b> <b>o</b> <b>L</b> <b>S</b> in a stream, <b>f</b> or <b>:limit PATTERN</b> (and <b>/</b> in the list)</td><td>narrow the list or stream to a platform, thread, speaker or a pattern, or switch between the list and the stream; <b>Alt-Left</b> widens it again.  A pattern is like mutt's: <b>word</b> anywhere, <b>~s</b> title or summary, <b>~b</b> any message, <b>~u</b> what you said, <b>~a</b> what the LLM replied, <b>~k</b> thinking, <b>~p</b> platform, <b>~d</b> / <b>~c</b> last / first date (2026-03..2026-06, &gt;2026-03-05, &lt;2w), <b>~r</b> rounds (&gt;10); space = and, <b>|</b> or, <b>!</b> not, ( ) group; e.g. <b>~u shekel !~a talent ~d 2026</b></td></tr>
 <tr><td><b>Tab</b> / <b>l</b> <b>h</b> on an entry</td><td>in a list (--outline): open / close the entry; <b>za zo zc zR zM</b> as in vim; <b>Enter</b> opens the thread here; <b>Alt-Left</b> comes back to the list as you left it, <b>Alt-Right</b> goes forward again (<b>q</b> quits)</td></tr>
+<tr><td><b>?</b> in a list or a log, <b>F1</b>, <b>:help</b></td><td>this help (in a text, <b>?</b> searches backward); <b>:</b> opens the command line</td></tr>
+<tr><td>the bottom rows in a list or a log</td><td>the key hints (a row above the bar; <b>:set nohints</b> hides it, <b>:set hints</b> brings it back) and the bar, which says which entry or message the cursor is in, of how many; the bar stays on the entry you are in</td></tr>
 <tr><td><b>zm</b> or <b>:set markdown</b></td><td>toggle rendered markdown (bold, italic, headings, code, links, quotes, bullets) and the raw text</td></tr>
 <tr><td><b>t</b> / ctrl +&minus;</td><td>dark / light; font size</td></tr>
 <tr><td><b>F1</b> or <b>:</b>help &nbsp; <b>q</b></td><td>this help; quit (refuses with unsaved changes)</td></tr></table>
@@ -1478,7 +1530,11 @@ function handleKey(k, e) {
   switch (k) {
     case " ": case "PageDown": pageDown(); break;
     case "PageUp": pageUp(); break;
-    case "/": if (S.outline) openPrompt(":", "limit "); else openPrompt("/"); break;      // in the thread list, / narrows (as f does); in a thread or a log it is the ordinary text search case "?": openPrompt("?"); break; case ":": openPrompt(":"); break;
+    // in the thread list, / narrows (as f does); in a thread or a log it is the ordinary text search
+    case "/": if (S.outline) openPrompt(":", "limit "); else openPrompt("/"); break;
+    // ? is the help in a list or a log (as in mutt), the backward search elsewhere
+    case "?": if (S.outline || S.stream) toggleHelp(true); else openPrompt("?"); break;
+    case ":": openPrompt(":"); break;
     case "n": stepMatch(S.searchBack ? -1 : 1); break; case "N": stepMatch(S.searchBack ? 1 : -1); break;
     case "-": pendingDash = true; break; case "#": toggleNumbers(); break;
     case "t": toggleTheme(); break; case "F1": toggleHelp(true); break; case "q": tryQuit(false); break;
@@ -1510,7 +1566,7 @@ function geom() {                   // where things actually are on screen (for 
   const c = view.querySelector(".vcur"), cb = c ? c.getBoundingClientRect() : null;
   return { inner: [innerWidth, innerHeight], view: r("view"), bar: r("bar"), panel: r("panel"), panelDisplay: getComputedStyle($("panel")).display,
            cursor: cb ? [Math.round(cb.left), Math.round(cb.top), Math.round(cb.width), Math.round(cb.height)] : null, cursorBg: c ? getComputedStyle(c).backgroundColor : null,
-           outline: { on: S.outline, stream: S.stream, fwd: S.fwd.length, entries: S.outline ? olInfo().lvl.filter(Boolean).length : 0, open: OL.ex.size, depth: S.back.length, hiddenLines: view.querySelectorAll('.line[style*="display: none"]').length },
+           outline: { on: S.outline, stream: S.stream, fwd: S.fwd.length, entries: S.outline ? olInfo().lvl.filter(Boolean).length : 0, open: OL.ex.size, depth: S.back.length, pos: barPos(), hints: hintKeys().length ? hintKeys().map(h => h[0]).join(' ') : '', hiddenLines: view.querySelectorAll('.line[style*="display: none"]').length },
            prompt: { open: !!S.prompt, ch: S.prompt || null, text: $("pin").value },
            md: { on: S.markdown, hidden: view.querySelectorAll(".md-hide").length, bold: view.querySelectorAll(".md-b").length, italic: view.querySelectorAll(".md-i").length,
                  code: view.querySelectorAll(".md-code").length, heads: view.querySelectorAll(".md-h").length, links: view.querySelectorAll(".md-link").length, urls: view.querySelectorAll(".url").length },

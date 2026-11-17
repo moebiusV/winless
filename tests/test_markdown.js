@@ -7,7 +7,7 @@ const a = src.indexOf("const MD = {"), b = src.indexOf("function toggleMarkdown"
 assert(a > 0 && b > a, "markdown section not found in viewer.html");
 const S = { markdown: true, lines: [] };
 const lcp = i => Array.from(S.lines[i] || "");
-const mod = new Function("S", "lcp", "setCursor", src.slice(a, b) + "; return { mdParse, mdSnap, mdLine, MD, bareUrls, linkAt, safeUrl, OL, olInfo, olToggle, olAll, olKey, olArg, olTitle, olReveal, stHeader, viewArg, olPlatform };")(S, lcp, (r, c) => { S.cur = { r, c }; });
+const mod = new Function("S", "lcp", "setCursor", src.slice(a, b) + "; return { mdParse, mdSnap, mdLine, MD, bareUrls, linkAt, safeUrl, OL, olInfo, olToggle, olAll, olKey, olArg, olTitle, olReveal, stHeader, viewArg, olPlatform, stInfo, barPos, hintKeys };")(S, lcp, (r, c) => { S.cur = { r, c }; });
 let n = 0, bad = 0;
 function t(name, fn) { n++; try { fn(); console.log("ok   " + name); } catch (e) { bad++; console.log("FAIL " + name + "\n     " + e.message); } }
 
@@ -150,6 +150,69 @@ t("a search hit inside a closed entry opens that entry, and only that one", () =
 t("a hit in a nested entry opens the whole chain above it", () => {
   outline(LIST); S.outline = true;
   assert(mod.olReveal(6)); assert(mod.OL.ex.has(5) && mod.OL.ex.has(3) && !mod.OL.ex.has(0)); assert.strictEqual(mod.olInfo().hid[6], 0);
+});
+
+// the bar's position text
+t("a list numbers its entries; a line belongs to the entry above it", () => {
+  const o = outline(LIST); assert.strictEqual(o.count, 4); assert.deepStrictEqual([...o.rank], [1, 1, 1, 2, 2, 3, 3, 4]);
+});
+t("the bar says which entry the cursor is in, of how many", () => {
+  outline(LIST); S.outline = true; S.stream = false;
+  S.cur = { r: 0, c: 0 }; assert.strictEqual(mod.barPos(), "entry 1 of 4 (25%)");
+  S.cur = { r: 4, c: 0 }; assert.strictEqual(mod.barPos(), "entry 2 of 4 (50%)");       // on a body line: the entry it belongs to
+  S.cur = { r: 7, c: 0 }; assert.strictEqual(mod.barPos(), "entry 4 of 4 (100%)");
+});
+t("above the first entry (the list's header lines) the cursor counts as on the first", () => {
+  outline(["list: 2 threads", "", "* a #1", "* b #2"]); S.cur = { r: 0, c: 0 }; assert.strictEqual(mod.barPos(), "entry 1 of 2 (50%)");
+});
+t("an empty list, and a list of one", () => {
+  outline(["nothing here"]); assert.strictEqual(mod.barPos(), "no entries");
+  outline(["* only #1"]); assert.strictEqual(mod.barPos(), "entry 1 of 1 (100%)");
+});
+t("a log numbers its messages, not its lines", () => {
+  S.outline = false; S.stream = true; S.vf = {};
+  inStream(3); assert.strictEqual(mod.stInfo().count, 3); assert.deepStrictEqual([...mod.stInfo().rank], [0, 0, 0, 1, 2, 2, 2, 2, 3]);
+  assert.strictEqual(mod.barPos(), "message 1 of 3 (33%)");
+  inStream(7); assert.strictEqual(mod.barPos(), "message 2 of 3 (67%)");               // a continuation line belongs to its message
+  inStream(8); assert.strictEqual(mod.barPos(), "message 3 of 3 (100%)");
+  S.lines = ["--- 2026-03-01 ---"]; S.cur = { r: 0, c: 0 }; assert.strictEqual(mod.barPos(), "no messages");
+});
+t("a log's numbering is recomputed for new text", () => {
+  S.outline = false; S.stream = true; inStream(3); assert.strictEqual(mod.stInfo().count, 3);
+  S.lines = STREAM.slice(0, 5); S.cur = { r: 4, c: 0 }; assert.strictEqual(mod.stInfo().count, 2); assert.strictEqual(mod.barPos(), "message 2 of 2 (100%)");
+});
+t("a plain text has no entry or message numbers", () => { S.outline = false; S.stream = false; S.lines = ["a", "b"]; S.cur = { r: 0, c: 0 }; assert.strictEqual(mod.barPos(), null); });
+S.outline = false; S.stream = false;
+
+// pine's key hints
+const keysOf = () => mod.hintKeys().map(([k]) => k).join(" ");
+t("a list with a hook hints at reading, folding, limiting and narrowing", () => {
+  S.outline = true; S.stream = false; S.hasHook = true; S.back = [];
+  assert.strictEqual(keysOf(), "Enter Tab f P m S ? q");
+  assert.deepStrictEqual(mod.hintKeys()[0], ["Enter", "read"]); assert.deepStrictEqual(mod.hintKeys().at(-1), ["q", "quit"]);
+});
+t("a list without a hook can only fold, so Enter says fold and the narrowing keys are not offered", () => {
+  S.outline = true; S.stream = false; S.hasHook = false; S.back = [];
+  assert.strictEqual(keysOf(), "Tab Enter / ? q"); assert.deepStrictEqual(mod.hintKeys()[1], ["Enter", "fold"]);
+  S.hasHook = true;
+});
+t("a log hints at its narrowing keys", () => { S.outline = false; S.stream = true; S.back = []; assert.strictEqual(keysOf(), "Enter P U o L f ? q"); });
+t("Alt-Left is hinted only when there is somewhere to go back to", () => {
+  S.outline = true; S.stream = false; S.back = []; assert(!keysOf().includes("Alt-"));
+  S.back = [{}]; assert(keysOf().includes("Alt-\u2190")); S.stream = true; S.outline = false; assert(keysOf().includes("Alt-\u2190"));
+});
+t("a thread opened from a list: back to the list, and F1 for help because ? is the backward search there", () => {
+  S.outline = false; S.stream = false; S.back = [{}];
+  assert.strictEqual(keysOf(), "Alt-\u2190 / n F1 q"); assert.deepStrictEqual(mod.hintKeys()[0], ["Alt-\u2190", "back to the list"]);
+});
+t("a plain text has no hint row", () => { S.outline = false; S.stream = false; S.back = []; assert.deepStrictEqual(mod.hintKeys(), []); });
+S.back = [];
+
+// A `case` label written after a `//` on the same line is part of the comment: the key silently does nothing
+// (this once killed `:` and `?` in normal mode, and no test sends keys).
+t("no switch label hides inside a line comment", () => {
+  const hidden = src.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /\/\/.*\bcase\s+"[^"]*"\s*:/.test(l));
+  assert.deepStrictEqual(hidden.map(([i]) => i), [], "case label inside a // comment at line(s) " + hidden.map(([i]) => i).join(", "));
 });
 
 console.log(n + " test(s), " + bad + " failed");

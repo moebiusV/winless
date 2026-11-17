@@ -146,6 +146,17 @@ the colon (for example the path of a database).  A source can also be linked int
 uploads cannot load libraries, so that is how it gets one.
 .B winless \-\-features
 lists the sources this winless offers as source:NAME.  A bad source refuses the load and leaves the window as it was.
+.PP
+In a list, a log, or a thread opened from one, the bottom of the window is pine-like: a row of key hints above the bar
+(.B :set nohints
+hides it,
+.B :set hints
+brings it back), and a bar that says which entry or message the cursor is in, of how many ("entry 12 of 3094 (0%)").
+The bar of the list stays on the entry you are in, dimmer while the cursor walks its body lines.
+.B ?
+opens the help in a list or a log (F1 and :help anywhere); in a text it is the backward search.
+.B :
+opens the command line.  q still quits the window; Alt-Left and Alt-Right go back and forward.
 .SH ANNOTATIONS
 In visual mode
 .B n

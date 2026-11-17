@@ -1,5 +1,16 @@
 2026-11-17  David Walther
 
+	* viewer.html: fixed `case "?"` and `case ":"` that sat after a // comment on one line, so `:` (command line) and `?` did nothing
+	  in normal mode; `?` is now the help in a list or a log and the backward search elsewhere.
+	* viewer.html: olInfo has rank and count (the entry each line belongs to); stInfo (cached per text) does the same for the messages
+	  of a log; barPos() gives "entry N of M (P%)" / "message N of M (P%)" for the bar.  hintKeys() (pure) and setHints(): the key-hint
+	  row (#hints, --hintsh added to the heights of #view, #panel and #help), `:set hints` / `:set nohints`.  .ol-own keeps the bar on
+	  the entry the cursor is in, .cur-row bars the cursor's row in a log or a list's body.  F1 help lists these.  status --json: geom.outline.pos, .hints.
+	* tests/test_markdown.js: entry and message numbering, barPos, hintKeys per view, and a check that no `case` label hides in a // comment.
+	* winless.1: the bottom rows of a list; ? and :.
+
+2026-11-17  David Walther
+
 	* winless_source.h (new), source.c (new): the source interface (struct wl_source: open, fetch, close; ABI 1) and the
 	  loader: a built-in source (-DWL_BUILTIN_SOURCE, ./configure --with-source=NAME:LIBDIR) or dlopen of NAME.so from
 	  $WINLESS_SOURCE_DIR, the data directory's sources/, or PKGLIBDIR/sources (not in a static build, -DWL_STATIC).

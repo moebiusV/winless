@@ -1,6 +1,11 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Lists, pine style: a row of key hints above the bar in a list, a log, or a thread opened from one (`:set nohints` / `:set hints`),
+  and a bar that says "entry 12 of 3094 (0%)" or "message 120 of 3000 (4%)" instead of line numbers; the bar of the list stays on
+  the entry you are in while the cursor walks its body, and the cursor's row is barred in a log.  `?` opens the help in a list or
+  a log.  Fixed: `:` and `?` did nothing in normal mode (a comment had swallowed their key bindings); a test now guards against it.
+  `status --json` reports geom.outline.pos and .hints.
   Sources: `winless open --source NAME:SPEC` lets a library answer a list's or stream's questions instead of a shell command
   (`--hook`): no process per key press, and the argument and the free text arrive as they are (the hook allows 64 safe
   characters and 1 KB of text).  A source is NAME.so exporting wl_source_entry() (winless_source.h, installed), found in
