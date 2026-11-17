@@ -26,6 +26,9 @@ Load a file, or standard input, and open the window if none is connected. Option
 .BR \-N " (line numbers),"
 .BR \-M " or " \-\-markdown " (render markdown: bold, italic, headings, code, links),"
 .BR \-S " (chop long lines),"
+.BR \-\-outline " (fold org-style headings, see LISTS AND SOURCES),"
+.BR \-\-stream " (a chat log),"
+.BR "\-\-hook CMD" " or " "\-\-source NAME:SPEC" " (what Enter and the narrowing keys ask),"
 .BR \-\-windowed " (normal window instead of full screen),"
 .BR \-\-no\-window " (load only),"
 .BR \-\-wait " (block until q or the window closes)."
@@ -116,6 +119,33 @@ Fill the bottom panel (opened by c, i, a, o ...) with TEXT, and with \-\-commit 
 .B write [\-f]
 Write the text to the file it was opened from, atomically (a temporary file in the same directory, then a rename).
 It refuses when the file has changed on disk since it was opened; \-f overwrites anyway.
+.SH LISTS AND SOURCES
+.B open \-\-outline
+folds a text of org-style headings (lines that begin with "* ", "** " ...) with the lines under each; every entry starts closed.
+Tab, l, h and Enter open and close, za zo zc zR zM work as in vim, and j and k step from entry to entry.
+.B open \-\-stream
+shows a chat log, one line per message ("[10:00] web#468 <you> text").
+.PP
+A list or a stream can ask for other views of its data: Enter on an entry reads it in the same window (Alt-Left comes back to the
+list as it was, Alt-Right goes forward again, q quits); P, U, m, o, L and S narrow or switch the view; f or :limit takes a mutt-style
+pattern.  The window does not know what the entries are: it sends a short argument (thread:468, stream:speaker:you, list:limit ...)
+and the free text of a pattern, and shows what comes back.  Who answers is fixed when the window is opened:
+.TP
+.BI \-\-hook " CMD"
+a shell command, run each time with {} replaced by the argument (letters, digits and _ . : \- only, at most 64 characters) and the
+free text in $WINLESS_TEXT (at most 1023 bytes); its output is the text.  60 seconds at most.
+.TP
+.BI \-\-source " NAME:SPEC"
+a library, with no shell and no process per request: the argument and the text are passed as they are, with no limit on their
+characters.  NAME.so is looked for in $WINLESS_SOURCE_DIR, in ~/.local/share/winless/sources and in the package's sources directory,
+and must export wl_source_entry() (see winless_source.h, installed with winless).  SPEC is whatever the source takes after
+the colon (for example the path of a database).  A source can also be linked into winless itself with
+.B ./configure \-\-with\-source=NAME:LIBDIR
+(it needs LIBDIR/libNAME.a); the static build that
+.B sshw
+uploads cannot load libraries, so that is how it gets one.
+.B winless \-\-features
+lists the sources this winless offers as source:NAME.  A bad source refuses the load and leaves the window as it was.
 .SH ANNOTATIONS
 In visual mode
 .B n
@@ -268,6 +298,9 @@ the replacement. :w, :w!, :q, :q! and :wq write and quit as in vim; q refuses wh
 changes. Edits live in the server until written, and a write that would overwrite a file changed by someone else is refused.
 Open a file (not standard input) to edit.
 .SH ENVIRONMENT
+.TP
+.B WINLESS_SOURCE_DIR
+A directory searched first for source libraries (NAME.so).
 .TP
 .B WINLESS_BACKEND
 The model backend for revisions: claude (default) or api. Read by the server when it starts.

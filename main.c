@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) { port = atoi(argv[i + 1]); explicit_port = 1; i += 2; }
         else if (!strcmp(argv[i], "--version")) { puts("winless " PACKAGE_VERSION); return 0; }
-        else if (!strcmp(argv[i], "--features")) { puts("bell"); return 0; }    /* what `winless ssh` may rely on when it finds this on a remote host */
+        else if (!strcmp(argv[i], "--features")) { puts("bell"); source_features(); return 0; }    /* what `winless ssh` may rely on when it finds this on a remote host */
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { char *h[] = { "help", NULL }; return client_main(port, 1, 1, h); }
         else { fprintf(stderr, "winless: unknown option %s (try --help)\n", argv[i]); return 2; }
     }

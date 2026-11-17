@@ -640,6 +640,8 @@ ac_includes_default="\
 ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
+SOURCE_LIBS
+SOURCE_BUILTIN
 INSTALL_DATA
 INSTALL_SCRIPT
 INSTALL_PROGRAM
@@ -692,6 +694,7 @@ SHELL'
 ac_subst_files=''
 ac_user_opts='
 enable_option_checking
+with_source
 '
       ac_precious_vars='build_alias
 host_alias
@@ -1314,6 +1317,14 @@ if test -n "$ac_init_help"; then
      short | recursive ) echo "Configuration of winless 0.2.0:";;
    esac
   cat <<\_ACEOF
+
+Optional Packages:
+  --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
+  --without-PACKAGE       do not use PACKAGE (same as --with-PACKAGE=no)
+  --with-source=NAME:LIBDIR
+                          link the source NAME (LIBDIR/lib NAME.a, exporting
+                          wl_source_entry) into winless; the static build that
+                          sshw uploads cannot load libraries
 
 Some influential environment variables:
   CC          C compiler command
@@ -3629,6 +3640,98 @@ else case e in #(
   e) as_fn_error $? "libsqlite3 is required (the annotation database)" "$LINENO" 5 ;;
 esac
 fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for library containing dlopen" >&5
+printf %s "checking for library containing dlopen... " >&6; }
+if test ${ac_cv_search_dlopen+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_func_search_save_LIBS=$LIBS
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char dlopen (void);
+int
+main (void)
+{
+return dlopen ();
+  ;
+  return 0;
+}
+_ACEOF
+for ac_lib in '' dl
+do
+  if test -z "$ac_lib"; then
+    ac_res="none required"
+  else
+    ac_res=-l$ac_lib
+    LIBS="-l$ac_lib  $ac_func_search_save_LIBS"
+  fi
+  if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_search_dlopen=$ac_res
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext
+  if test ${ac_cv_search_dlopen+y}
+then :
+  break
+fi
+done
+if test ${ac_cv_search_dlopen+y}
+then :
+
+else case e in #(
+  e) ac_cv_search_dlopen=no ;;
+esac
+fi
+rm conftest.$ac_ext
+LIBS=$ac_func_search_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_search_dlopen" >&5
+printf "%s\n" "$ac_cv_search_dlopen" >&6; }
+ac_res=$ac_cv_search_dlopen
+if test "$ac_res" != no
+then :
+  test "$ac_res" = "none required" || LIBS="$ac_res $LIBS"
+
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: no dlopen: sources cannot be loaded from libraries" >&5
+printf "%s\n" "$as_me: WARNING: no dlopen: sources cannot be loaded from libraries" >&2;} ;;
+esac
+fi
+
+
+# Check whether --with-source was given.
+if test ${with_source+y}
+then :
+  withval=$with_source; SOURCE_NAME=${withval%%:*}; SOURCE_DIR=${withval#*:}
+   if test -f "$SOURCE_DIR/lib$SOURCE_NAME.a"
+then :
+
+else case e in #(
+  e) as_fn_error $? "$SOURCE_DIR/lib$SOURCE_NAME.a not found" "$LINENO" 5 ;;
+esac
+fi
+   SOURCE_BUILTIN="-DWL_BUILTIN_SOURCE"
+   SOURCE_LIBS="-L$SOURCE_DIR -l$SOURCE_NAME -lsqlite3 -ljson-c -lz"
+else case e in #(
+  e) SOURCE_BUILTIN=; SOURCE_LIBS= ;;
+esac
+fi
+
+
 
 ac_config_files="$ac_config_files Makefile"
 

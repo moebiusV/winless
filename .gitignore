@@ -13,3 +13,4 @@ tests/test_revise
 /remote/
 /remote-stamp
 tests/test_remote
+tests/test_source

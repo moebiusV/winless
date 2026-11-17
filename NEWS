@@ -1,6 +1,12 @@
 winless NEWS -- history of user-visible changes
 
 * Unreleased
+  Sources: `winless open --source NAME:SPEC` lets a library answer a list's or stream's questions instead of a shell command
+  (`--hook`): no process per key press, and the argument and the free text arrive as they are (the hook allows 64 safe
+  characters and 1 KB of text).  A source is NAME.so exporting wl_source_entry() (winless_source.h, installed), found in
+  $WINLESS_SOURCE_DIR, ~/.local/share/winless/sources or the package's sources directory, or linked in with
+  `./configure --with-source=NAME:LIBDIR` -- which the static build that sshw uploads needs.  `winless --features` lists
+  source:NAME.  A source that cannot be opened refuses the load and leaves the window as it was.  A source is any library that implements winless_source.h.
   Rendered markdown: `winless open -M` (or `config --markdown`, or `zm` / `:set markdown` in the window) draws headings, quotes, bullets, **bold**, *italic*,
   `code`, ~~strike~~ and [links](url) as styled text.  The marks stay in the text, so search, selection and notes work on the real text, but they are hidden,
   and the cursor steps over them; `zm` shows the raw text again.  Tables drawn with box characters never wrap: h/l/arrows scroll them sideways when the cursor is

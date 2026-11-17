@@ -93,6 +93,11 @@ void llm_request_json(sb_t *out, const char *system, const char *user, size_t us
 char **llm_claude_argv(const char *system, const char *model, const char *effort);
 void llm_free_argv(char **a);
 
+/* ---- source.c ---- (winless_source.h) */
+struct wl_source;
+const struct wl_source *source_find(const char *name, char **err);   /* NULL with a malloc'd message in *err */
+void source_features(void);                                          /* prints "source" and "source:NAME" lines for --features */
+
 /* ---- server.c ---- */
 int server_run(int port, double idle_secs);              /* serve until stopped (or, if idle_secs > 0, until no window has been connected and no edits are unsaved for that long) */
 

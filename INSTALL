@@ -26,3 +26,12 @@ Using winless on remote hosts (sshw)
 libsqlite3.a are installed (libc6-dev, libsqlite3-dev), `make` also builds a static winless for this platform into remote/OS-MACHINE/winless, which `sshw`
 uploads to hosts that have none.  Without them everything else works; sshw then needs winless installed on the hosts, or a compiler there to build it.
 Requires OpenSSH 6.7 or later on this machine.  See sshw(1).
+
+Sources
+-------
+A list window can be answered by a library (winless open --source NAME:SPEC, see winless(1)).  To link one into winless
+itself, which the static build uploaded by sshw needs because it cannot load libraries:
+
+    ./configure --with-source=NAME:LIBDIR     # LIBDIR holds libNAME.a, which exports wl_source_entry()
+
+Without it, a source is a NAME.so in ~/.local/share/winless/sources or PREFIX/lib/winless/sources.

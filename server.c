@@ -5,6 +5,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "winless.h"
+#include "winless_source.h"
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <time.h>
@@ -43,6 +44,7 @@ typedef struct { char *pattern; char *color; } hl_t;
 static struct {
     char *name; char *text; size_t textlen; long version;
     char *theme, *font; long size; int numbers, wrap, markdown, outline, stream;   /* numbers/wrap/markdown/outline/stream: -1 = unset */
+    const wl_source *src; void *src_h; char *src_spec;  /* `open --source NAME:SPEC`: a library answers the hook instead of a command */
     char *hook;                                         /* `open --hook CMD`: run when the page asks (Enter on a list entry); {} is the entry's id */
     mark_t *marks; size_t nmarks;
     hl_t *hls; size_t nhls;
@@ -109,7 +111,8 @@ static void settings_json(sb_t *b) {
     if (H.markdown >= 0) { SEP(); sb_printf(b, "\"markdown\":%s", H.markdown ? "true" : "false"); }
     if (H.outline >= 0) { SEP(); sb_printf(b, "\"outline\":%s", H.outline ? "true" : "false"); }
     if (H.stream >= 0) { SEP(); sb_printf(b, "\"stream\":%s", H.stream ? "true" : "false"); }
-    if (H.hook) { SEP(); sb_puts(b, "\"hook\":"); json_put_string(b, H.hook, strlen(H.hook)); }
+    if (H.src) { SEP(); sb_puts(b, "\"hook\":"); sb_puts(b, "\"source\""); }      /* the page only needs to know that Enter can ask */
+    else if (H.hook) { SEP(); sb_puts(b, "\"hook\":"); json_put_string(b, H.hook, strlen(H.hook)); }
 #undef SEP
     sb_putc(b, '}');
 }
@@ -911,10 +914,43 @@ static void review_command(const jv *v, sb_t *r) {
     put_result(r, NULL);
 }
 
+/* `NAME:SPEC` -> the window answers its hook from that source.  NULL on success, else a malloc'd message. */
+static char *source_attach(const char *spec) {
+    if (H.src_spec && !strcmp(H.src_spec, spec)) return NULL;
+    const char *colon = strchr(spec, ':');
+    if (!colon) return xstrdup("--source wants NAME:SPEC");
+    char *name = xstrndup(spec, (size_t)(colon - spec)), *err = NULL;
+    const wl_source *src = source_find(name, &err);
+    free(name);
+    if (!src) return err;
+    void *h = src->open(colon + 1, &err);
+    if (!h) { if (!err) err = xstrdup("the source could not be opened"); return err; }
+    if (H.src) H.src->close(H.src_h);
+    H.src = src; H.src_h = h; free(H.src_spec); H.src_spec = xstrdup(spec);
+    return NULL;
+}
+
+/* The hook of a window with a source: no shell, no process; the source gets the argument and the free text as they are. */
+static void source_hook(const jv *v, sb_t *r) {
+    const char *arg = json_gets(v, "arg", NULL);
+    size_t tl = 0; const char *txt = json_gets(v, "text", &tl);
+    if (!arg || !*arg || strlen(arg) > 4096) { put_result(r, "bad argument"); return; }
+    if (tl > 65536) { put_result(r, "the text is too long"); return; }
+    char *out = NULL, *err = NULL;
+    if (H.src->fetch(H.src_h, arg, txt ? txt : "", &out, &err) != 0) {
+        sb_t msg; sb_init(&msg); sb_printf(&msg, "%s", err ? err : "the source failed");
+        put_result(r, msg.s); sb_free(&msg); free(err); free(out); return;
+    }
+    sb_t clean; sb_init(&clean); sb_put_utf8_clean(&clean, out ? out : "", out ? strlen(out) : 0);
+    sb_puts(r, "{\"ok\":true,\"text\":"); json_put_string(r, clean.s, clean.len); sb_putc(r, '}');
+    sb_free(&clean); free(out);
+}
+
 /* The page asks to run the window's hook: Enter on an entry of a list opens it in this same window.  The command line was fixed by whoever ran
  * `winless open --hook CMD`; the page supplies only the argument that replaces {}, and that is limited to letters, digits and _ . : - so nothing
  * can be injected.  The command's output comes back as {"ok":true,"text":...}; the page shows it and `q` returns to the list. */
 static void hook_command(const jv *v, sb_t *r) {
+    if (H.src) { source_hook(v, r); return; }
     const char *arg = json_gets(v, "arg", NULL);
     if (!H.hook || !*H.hook) { put_result(r, "this window has no command (open it with --hook CMD)"); return; }
     if (!arg || !*arg || strlen(arg) > 64) { put_result(r, "bad argument"); return; }
@@ -1033,6 +1069,14 @@ static void h_cmd(conn *c, const char *body, size_t blen) {
     }
     int stop = 0, bcast = 1;
     if (!strcmp(cmd, "load")) {
+        const char *srcspec = json_gets(json_get(v, "settings"), "source", NULL);
+        if (srcspec) {
+            char *serr = source_attach(srcspec);
+            if (serr) {
+                sb_t er; sb_init(&er); sb_puts(&er, "{\"ok\":false,\"error\":"); json_put_string(&er, serr, strlen(serr)); sb_putc(&er, '}');
+                free(serr); json_free(v); respond_json(c, &er); return;
+            }
+        }
         size_t tl = 0; const char *nm = json_gets(v, "name", NULL), *tx = json_gets(v, "text", &tl);
         free(H.name); H.name = xstrdup(nm ? nm : "");
         free(H.text); H.text = xstrndup(tx ? tx : "", tl); H.textlen = tl;

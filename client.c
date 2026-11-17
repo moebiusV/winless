@@ -244,7 +244,7 @@ static int ensure_window(int port, int windowed) {
 static void usage(FILE *f) {
     fputs("usage: winless [--port N] COMMAND [ARGS]\n"
           "  open [FILE|-] [--new|--here] [--force] [--name N] [--line N] [--search P] [--theme dark|light] [--font F] [--size PX]\n"
-          "       [-N] [-S] [-M] [--outline|--stream] [--hook CMD] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
+          "       [-N] [-S] [-M] [--outline|--stream] [--hook CMD|--source NAME:SPEC] [--windowed] [--no-window] [--wait]     show a file (or stdin)\n"
           "  goto LINE|N%|top|bottom      scroll [-p] N      search [-b] PATTERN   next  prev  clear\n"
           "  mark A[-B] [COLOR]  unmark   hl PATTERN [COLOR]  unhl   key KEY...   flash TEXT\n"
           "  config [--theme T] [--font F] [--size N] [--numbers|--no-numbers] [--wrap|--chop] [--markdown|--no-markdown]\n"
@@ -349,7 +349,7 @@ static int resolve_port(void) {
 }
 
 static int cmd_open(int port, int explicit, int argc, char **argv) {
-    const char *file = NULL, *name = NULL, *search = NULL, *theme = NULL, *font = NULL, *hook = NULL;
+    const char *file = NULL, *name = NULL, *search = NULL, *theme = NULL, *font = NULL, *hook = NULL, *source = NULL;
     long line = 0, size = 0;
     int numbers = 0, markdown = 0, outline = 0, stream = 0, chop = 0, wait = 0, nowin = 0, windowed = 0, force = 0, newwin = 0, here = 0;
     for (int i = 0; i < argc; i++) {
@@ -366,6 +366,7 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
         else if (!strcmp(a, "--outline")) outline = 1;
         else if (!strcmp(a, "--stream")) stream = 1;
         else if (!strcmp(a, "--hook") && i + 1 < argc) hook = argv[++i];
+        else if (!strcmp(a, "--source") && i + 1 < argc) source = argv[++i];
         else if (!strcmp(a, "--wait")) wait = 1;
         else if (!strcmp(a, "--force")) force = 1;
         else if (!strcmp(a, "--new")) newwin = 1;
@@ -376,6 +377,7 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
         else if (a[0] != '-' && !file) file = a;
         else { fprintf(stderr, "winless open: unknown argument %s\n", a); return 2; }
     }
+    if (source && hook) { fprintf(stderr, "winless open: use --source or --hook, not both\n"); return 2; }
     /* Opening must never disturb a window that is already open: unless told otherwise, every open starts its own server,
      * on a port chosen now, and that server serves only this window.  --here replaces the text of the one existing window. */
     int fresh = 0;
@@ -429,6 +431,7 @@ static int cmd_open(int port, int explicit, int argc, char **argv) {
     if (outline) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"outline\":true"); first = 0; }
     if (stream) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"stream\":true"); first = 0; }
     if (hook) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"hook\":"); json_put_string(&b, hook, strlen(hook)); first = 0; }
+    if (source) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"source\":"); json_put_string(&b, source, strlen(source)); first = 0; }
     if (chop) { if (!first) sb_putc(&b, ','); sb_puts(&b, "\"wrap\":false"); }
     sb_puts(&b, "}}");
     char *lresp = NULL;

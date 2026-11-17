@@ -1,3 +1,16 @@
+2026-11-17  David Walther
+
+	* winless_source.h (new), source.c (new): the source interface (struct wl_source: open, fetch, close; ABI 1) and the
+	  loader: a built-in source (-DWL_BUILTIN_SOURCE, ./configure --with-source=NAME:LIBDIR) or dlopen of NAME.so from
+	  $WINLESS_SOURCE_DIR, the data directory's sources/, or PKGLIBDIR/sources (not in a static build, -DWL_STATIC).
+	* server.c: `settings.source` on load attaches a source (a bad one refuses the load, the window is untouched); the hook
+	  command goes to the source when there is one (no shell; argument up to 4096 bytes, text up to 64 KB, passed as is);
+	  the page is told hook = "source" so Enter works.
+	* client.c: open --source NAME:SPEC (not with --hook).  main.c: --features lists source and source:NAME.
+	* Makefile.in, configure.ac: source.c, --with-source, -ldl, PKGLIBDIR, install of winless_source.h and the sources
+	  directory, tests/test_source.c.  winless.1: LISTS AND SOURCES (--outline, --stream, --hook, --source).
+	* tests/test_source.c: a fake source library compiled by the test and loaded by the real server.
+
 2026-11-07  David Walther
 
 	* viewer.html: `/` in an outline list opens the :limit prompt (narrows, opens nothing); in threads and logs it stays the ordinary search.  geom() reports the prompt state.

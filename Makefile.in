@@ -10,6 +10,11 @@ datarootdir = @datarootdir@
 datadir = @datadir@
 mandir = @mandir@
 pkgdatadir = $(datadir)/$(PACKAGE)
+libdir = @libdir@
+pkglibdir = $(libdir)/$(PACKAGE)
+includedir = @includedir@
+SOURCE_BUILTIN = @SOURCE_BUILTIN@
+SOURCE_LIBS = @SOURCE_LIBS@
 CC = @CC@
 CFLAGS = @CFLAGS@
 CPPFLAGS = @CPPFLAGS@
@@ -20,37 +25,37 @@ INSTALL_PROGRAM = @INSTALL_PROGRAM@
 INSTALL_DATA = @INSTALL_DATA@
 
 WARN = -Wall -Wextra -Wpedantic
-DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\"
-SRCS = main.c client.c server.c remote.c json.c util.c edit.c edits.c llm.c store.c
-OBJS = main.o client.o server.o remote.o json.o util.o edit.o edits.o llm.o store.o
-DIST_FILES = main.c client.c server.c remote.c json.c util.c edit.c edits.c llm.c store.c winless.h viewer.html winless.1 sshw.1 configure configure.ac Makefile.in \
+DEFS = -D_POSIX_C_SOURCE=200809L -DPACKAGE_VERSION=\"$(VERSION)\" -DPKGDATADIR=\"$(pkgdatadir)\" -DPKGLIBDIR=\"$(pkglibdir)\" $(SOURCE_BUILTIN)
+SRCS = main.c client.c server.c remote.c source.c json.c util.c edit.c edits.c llm.c store.c
+OBJS = main.o client.o server.o remote.o source.o json.o util.o edit.o edits.o llm.o store.o
+DIST_FILES = main.c client.c server.c remote.c source.c json.c util.c edit.c edits.c llm.c store.c winless.h winless_source.h viewer.html winless.1 sshw.1 configure configure.ac Makefile.in \
              install-sh README.md COPYING AUTHORS NEWS ChangeLog INSTALL tests/testlib.h tests/testlib.c tests/test_unit.c \
-             tests/test_server.c tests/test_cli.c tests/test_revise.c tests/test_remote.c tests/test_markdown.js
+             tests/test_server.c tests/test_cli.c tests/test_revise.c tests/test_remote.c tests/test_source.c tests/test_markdown.js
 
 all: winless remote-stamp winless-src.tar.gz
 
 winless: $(OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(SOURCE_LIBS) $(LIBS)
 
 # A static build for this platform, which `sshw` uploads to hosts that have no winless (remote/<Os>-<machine>/winless).  It is optional:
 # without libc.a and libsqlite3.a it is skipped, and sshw then works only on hosts that already have winless.
 remote-stamp: $(SRCS) winless.h
 	@key=`uname -sm | tr ' ' '-'`; mkdir -p remote/$$key; \
-	if $(CC) -std=c11 -static $(DEFS) $(CPPFLAGS) $(CFLAGS) -o remote/$$key/winless $(SRCS) $(LIBS) -lpthread -ldl >/dev/null 2>&1; then \
+	if $(CC) -std=c11 -static -DWL_STATIC $(DEFS) $(CPPFLAGS) $(CFLAGS) -o remote/$$key/winless $(SRCS) $(SOURCE_LIBS) $(LIBS) -lpthread -ldl >/dev/null 2>&1; then \
 	  echo "built remote/$$key/winless (what sshw uploads to hosts without winless)"; \
 	else rm -rf remote; echo "note: no static build here (needs libc.a and libsqlite3.a); sshw will work only on hosts that already have winless"; fi; \
 	touch remote-stamp
 
 # The sources, for `sshw` to build winless on a host that has a C compiler but no binary from us (it then keeps the result in its archive).
-winless-src.tar.gz: $(SRCS) winless.h viewer.html
-	tar czf $@ -C $(srcdir) $(SRCS) winless.h viewer.html
+winless-src.tar.gz: $(SRCS) winless.h winless_source.h viewer.html
+	tar czf $@ -C $(srcdir) $(SRCS) winless.h winless_source.h viewer.html
 
-%.o: %.c winless.h Makefile
+%.o: %.c winless.h winless_source.h Makefile
 	$(CC) -std=c11 $(WARN) $(DEFS) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 # The tests are C programs (tests/*.c): unit tests of json.c/util.c, and black-box tests that start the real winless
 # binary.  `make check` builds and runs them; sh only invokes them.
-TEST_PROGS = tests/test_unit tests/test_server tests/test_cli tests/test_revise tests/test_remote
+TEST_PROGS = tests/test_unit tests/test_server tests/test_cli tests/test_revise tests/test_remote tests/test_source
 TEST_OBJS = tests/testlib.o
 
 tests/%.o: tests/%.c tests/testlib.h winless.h Makefile
@@ -67,8 +72,10 @@ tests/test_revise: tests/test_revise.o $(TEST_OBJS) json.o util.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_revise.o $(TEST_OBJS) json.o util.o $(LIBS)
 tests/test_remote: tests/test_remote.o $(TEST_OBJS) json.o util.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_remote.o $(TEST_OBJS) json.o util.o $(LIBS)
+tests/test_source: tests/test_source.o $(TEST_OBJS) json.o util.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_source.o $(TEST_OBJS) json.o util.o $(LIBS)
 
-RUN_TESTS = for t in $(TEST_PROGS); do echo "== $$t"; WINLESS_BIN=$(CURDIR)/winless WINLESS_HTML=$(srcdir)/viewer.html ./$$t || exit 1; done
+RUN_TESTS = for t in $(TEST_PROGS); do echo "== $$t"; WINLESS_SRCDIR=$(abspath $(srcdir)) WINLESS_BIN=$(CURDIR)/winless WINLESS_HTML=$(srcdir)/viewer.html ./$$t || exit 1; done
 
 # The viewer page is one big script; a syntax error in it would break every window, so check it when node is available.
 check-viewer:
@@ -91,6 +98,8 @@ install: all
 	$(srcdir)/install-sh -d $(DESTDIR)$(bindir) $(DESTDIR)$(pkgdatadir) $(DESTDIR)$(mandir)/man1
 	$(INSTALL_PROGRAM) winless $(DESTDIR)$(bindir)/winless
 	$(INSTALL_DATA) $(srcdir)/viewer.html $(DESTDIR)$(pkgdatadir)/viewer.html
+	$(srcdir)/install-sh -d $(DESTDIR)$(includedir) $(DESTDIR)$(pkglibdir)/sources
+	$(INSTALL_DATA) $(srcdir)/winless_source.h $(DESTDIR)$(includedir)/winless_source.h
 	$(INSTALL_DATA) $(srcdir)/winless.1 $(DESTDIR)$(mandir)/man1/winless.1
 	$(INSTALL_DATA) $(srcdir)/sshw.1 $(DESTDIR)$(mandir)/man1/sshw.1
 	$(INSTALL_DATA) winless-src.tar.gz $(DESTDIR)$(pkgdatadir)/winless-src.tar.gz
